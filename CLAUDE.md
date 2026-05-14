@@ -32,11 +32,11 @@ Project-level instructions for Claude Code sessions working on this repository.
 
 ## Current State
 
-Phases 1–9 complete. 23 LLM-callable tools registered across `code`, `writing`, `project`, and `dynamic` categories.
+Phases 1–10 complete. 26 LLM-callable tools registered across `code`, `writing`, `project`, and `dynamic` categories.
 
 Key components:
 - `executor/runner.py` — subprocess runner with `conda run -n <env>`, SIGTERM/SIGKILL, before/after file diff
-- `tools/{code,writing,project,dynamic,package}_tools.py` — five tool modules auto-registered via `tools/__init__.py`
+- `tools/{code,writing,project,dynamic,package,env}_tools.py` — six tool modules auto-registered via `tools/__init__.py`
 - `tools/external_access.py` — session whitelist for `read_external_file`
 - `workspace/manager.py` — `init_workspace`, `validate_workspace`, state file load/save
 - `planner/task_graph.py` — DAG with cycle detection

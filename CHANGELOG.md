@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Phase 10 — Conda environment setup (2026-05-14):
+  - `research_manager/tools/env_tools.py` — three new tools (category `dynamic`):
+    - `scan_dependencies(include_packages)` — AST-based parsing of `script/*.py` for top-level imports (stdlib filtered via `sys.stdlib_module_names`) and regex-based parsing of `script/*.R` / `.r` for `library()` / `require()` calls; optional walk into `packages/*/src/`
+    - `plan_environment(...)` — generates three install plans side-by-side: conda-only, conda+pip mixed, and `environment.yml`; small built-in `_IMPORT_TO_PIP` map for common name aliases (`cv2`→`opencv-python`, `sklearn`→`scikit-learn`, etc.) and `_PYPI_ONLY` set for packages that don't live in conda-forge
+    - `apply_environment_plan(plan, ..., execute)` — renders or executes the chosen plan via `ScriptRunner.run_shell()` (1800s timeout); writes `environment.yml` to workspace root for plan C
+  - CLI: REPL command `/env scan [--all]` and `/env plan`; `_on_tool_call` intercepts `plan_environment` results from the LLM and walks the user through choose-plan → execute prompts (same pattern as `build_package`)
+  - Tool count: 23 → 26
+- Phase 9 — Session persistence (2026-05-14):
+  - `research_manager/sessions.py` — auto-save (3 rotating slots under `.research_manager_sessions/auto/`), manual save to `saved/`, load by name, list all sessions
+  - CLI: REPL commands `/sessions`, `/save [name]`, `/load <name>`; after every successful chat turn the current slot is updated; on `/quit` or Ctrl-C/Ctrl-D, the REPL asks whether to manually save before exiting
+- Phase 8 — Package builder (2026-05-14):
+  - `research_manager/tools/package_tools.py` — `build_package` (validates inputs, returns manifest for user confirmation) and `confirm_package_build` (writes pyproject.toml, src layout, README, tests stub)
+  - CLI: REPL command `/package <name>` with interactive script selection, dependency entry, and confirm-overwrite; `_on_tool_call` intercepts LLM-triggered `build_package` calls and prompts the user before writing
+  - Workspace: `packages/` added to `WORKSPACE_DIRS`
 - Phase 7 — External file access (2026-05-14):
   - `research_manager/tools/external_access.py` — session-level whitelist for directories outside the workspace, seeded from `RM_EXTERNAL_READ_PATHS` env var and extensible via REPL
   - `research_manager/tools/writing_tools.py` — new `read_external_file` and `list_external_allowed` tools; relaxed extension list for external reads (adds `.ipynb`, `.html`, `.toml`, `.cfg`, etc.)

@@ -91,6 +91,7 @@ research_manager/
 │   │   ├── project_tools.py   # init_project, list_workspace, add_task, ...
 │   │   ├── dynamic_tools.py   # propose_script, save_proposed_script, revise_script, run_saved_script
 │   │   ├── package_tools.py   # build_package, confirm_package_build
+│   │   ├── env_tools.py       # scan_dependencies, plan_environment, apply_environment_plan
 │   │   └── external_access.py # session whitelist for read_external_file
 │   ├── planner/
 │   │   └── task_graph.py      # DAG with cycle detection and topological sort
@@ -158,7 +159,7 @@ easy-research batch questions.md -w 4  # parallel batch mode
 easy-research --auto-approve ...       # skip script-proposal prompts
 ```
 
-REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/package <name>`, `/sessions`, `/save [name]`, `/load <name>`, `/reset`, `/help`, `/quit`.
+REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/package <name>`, `/env scan|plan`, `/sessions`, `/save [name]`, `/load <name>`, `/reset`, `/help`, `/quit`.
 
 ### Reading files outside the workspace
 
@@ -326,6 +327,52 @@ the manifest panel, prompts y/N, and calls `confirm_package_build` on approval.
 If the package already exists, the user is offered overwrite (with backup) or
 cancel.
 
+### Phase 10: Conda Environment Setup ✅
+
+Scan workspace scripts for imported dependencies, generate three install
+plans, let the user pick one, and optionally execute it.
+
+Tools (category `dynamic`):
+
+- **`scan_dependencies(include_packages)`** — walks `script/` (and optionally
+  `packages/*/src/`), parses Python files with `ast` (filters stdlib via
+  `sys.stdlib_module_names`) and R files with regex on `library()` /
+  `require()`. Returns top-level Python imports + R packages plus a
+  per-file breakdown.
+- **`plan_environment(python_packages, r_packages, target_env, python_version, create_new)`**
+  — generates three plans side-by-side:
+  - **Plan A: conda-only** — `conda install -c conda-forge ...`; packages
+    not available there are listed in `fallback_pypi_only`
+  - **Plan B: mixed** — conda for what it can resolve, `pip install` for
+    the rest (a small built-in `_PYPI_ONLY` set)
+  - **Plan C: environment.yml** — full `environment.yml` text plus the
+    `conda env create -f environment.yml` command
+  Import-name normalization is built in (e.g. `cv2` → `opencv-python`,
+  `sklearn` → `scikit-learn`).
+- **`apply_environment_plan(plan, target_env, ..., execute)`** — either
+  prints the chosen plan's commands (`execute=false`) or runs them via
+  `ScriptRunner.run_shell()` with a 1800s timeout (`execute=true`). For
+  Plan C, writes `environment.yml` to the workspace root.
+
+REPL command `/env`:
+```
+you > /env scan
+  python: cv2, numpy, openai, pandas, sklearn
+  R:      dplyr, ggplot2
+
+you > /env plan
+  target env (existing name, or 'new:<name>'): new:my_proj
+  python version [3.11]:
+  → shows all three plans in syntax-highlighted panels
+  choose plan [A/B/C/cancel]: B
+  execute now? (y/N/show): show
+  → renders the commands; user can copy or re-run with y
+```
+
+LLM tool-call path: `_on_tool_call` intercepts `plan_environment` results,
+shows the three panels, and walks the user through the choose/execute
+prompts (same shape as the package-builder intercept).
+
 ### Phase 9: Session Persistence ✅
 
 Conversations are automatically saved and can be manually preserved or restored.
@@ -355,6 +402,7 @@ Conversations are automatically saved and can be manually preserved or restored.
 - [x] Phase 7 — External file access (read_external_file + whitelist) — 2026-05-14
 - [x] Phase 8 — Package builder (build_package + /package command) — 2026-05-14
 - [x] Phase 9 — Session persistence (auto-save, /save, /load, /sessions) — 2026-05-14
+- [x] Phase 10 — Conda environment setup (scan_dependencies + plan_environment + /env) — 2026-05-14
 - [x] `easy-research clean` subcommand and `.env.example` auto-generation in `init` — 2026-05-14
 - [x] `.env` discovery fixed for installed console script (use cwd, not module path) — 2026-05-14
 - [x] Tool-schema generator now emits valid `items` for bare `list` annotations — 2026-05-14
@@ -365,7 +413,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## Status
 
-Phases 1–9 implemented. The CLI installs as `easy-research` and exposes 23 LLM-callable tools across `code`, `writing`, `project`, and `dynamic` categories.
+Phases 1–10 implemented. The CLI installs as `easy-research` and exposes 26 LLM-callable tools across `code`, `writing`, `project`, and `dynamic` categories.
 
 ## License
 

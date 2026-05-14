@@ -67,6 +67,7 @@ def _print_help() -> None:
         "  /allowed        - show approved external directories\n"
         "  /deny <dir>     - revoke a previously approved directory\n"
         "  /package <name> - build a pip-installable package from scripts\n"
+        "  /env scan|plan  - scan deps and plan a conda environment\n"
         "  /sessions       - list saved and auto-saved sessions\n"
         "  /save [name]    - save current conversation (permanent)\n"
         "  /load <name>    - load a session (e.g. 'auto-0' or a saved name)\n"
@@ -85,6 +86,8 @@ def _on_tool_call(name: str, args: dict, result: str) -> None:
         _handle_proposal(args, result)
     if name == "build_package":
         _handle_package_confirmation(result)
+    if name == "plan_environment":
+        _handle_env_plan_confirmation(result)
 
 
 def _print_proposal_preview(args: dict, parsed: dict) -> None:
@@ -417,6 +420,192 @@ def _run_package_command(name: str, ws: Path) -> None:
             console.print(f"[red]build failed: {err}[/red]")
 
 
+def _handle_env_plan_confirmation(result: str) -> None:
+    """Intercept plan_environment tool result; show plans, prompt selection, optionally apply."""
+    try:
+        parsed = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not parsed.get("needs_user_confirmation"):
+        return
+
+    target_env = parsed.get("target_env", "")
+    plans = parsed.get("plans", {})
+    if not plans:
+        return
+
+    _show_plan_panels(plans)
+
+    if not sys.stdin.isatty() or _AUTO_APPROVE_PROPOSALS:
+        console.print("[dim]plan_environment is informational — no auto-execution[/dim]")
+        return
+
+    _prompt_and_apply_plan(parsed, target_env)
+
+
+def _show_plan_panels(plans: dict) -> None:
+    a = plans.get("conda_only", {})
+    b = plans.get("mixed", {})
+    c = plans.get("yml", {})
+
+    a_body = "\n".join(a.get("commands", []))
+    if a.get("fallback_pypi_only"):
+        a_body += f"\n\n[dim]not in conda-forge: {', '.join(a['fallback_pypi_only'])}[/dim]"
+    console.print(Panel(a_body or "(empty)", title="Plan A — conda only", border_style="cyan"))
+
+    b_body = "\n".join(b.get("commands", []))
+    console.print(Panel(b_body or "(empty)", title="Plan B — conda + pip", border_style="green"))
+
+    c_body = c.get("yml", "") + "\n[dim]apply with:[/dim]\n" + c.get("apply_command", "")
+    console.print(Panel(c_body, title="Plan C — environment.yml", border_style="magenta"))
+
+
+def _prompt_and_apply_plan(parsed: dict, target_env: str) -> None:
+    try:
+        choice = console.input(
+            "[bold yellow]choose plan [A/B/C/cancel]: [/bold yellow]"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+
+    plan_map = {"a": "conda_only", "b": "mixed", "c": "yml"}
+    plan_key = plan_map.get(choice)
+    if not plan_key:
+        console.print("[dim]cancelled[/dim]")
+        return
+
+    try:
+        run_choice = console.input(
+            "[bold yellow]execute now? (y/N/show): [/bold yellow]"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+
+    execute = run_choice in ("y", "yes")
+    if not execute and run_choice not in ("show", "s"):
+        console.print("[dim]cancelled[/dim]")
+        return
+
+    args = {
+        "plan": plan_key,
+        "target_env": target_env,
+        "python_packages": parsed.get("python_packages", []),
+        "r_packages": parsed.get("r_packages", []),
+        "python_version": parsed.get("python_version", "3.11"),
+        "create_new": parsed.get("create_new", False),
+        "execute": execute,
+    }
+    r = ToolRegistry.call_tool("apply_environment_plan", args, timeout=1800)
+    try:
+        res = json.loads(r)
+    except (json.JSONDecodeError, TypeError):
+        console.print(f"[red]apply failed: {r}[/red]")
+        return
+
+    if not execute:
+        console.print("[dim]commands rendered (not executed):[/dim]")
+        for cmd in res.get("commands", []):
+            console.print(f"  {cmd}")
+        return
+
+    if res.get("ok"):
+        console.print(f"[green]done — env '{target_env}' set up via plan {plan_key}[/green]")
+    else:
+        console.print(f"[red]apply failed; check the steps below[/red]")
+    for step in res.get("steps", []):
+        marker = "[green]✓[/green]" if step.get("ok") else "[red]✗[/red]"
+        console.print(f"{marker} {step['command']}")
+        if step.get("stderr_tail") and not step.get("ok"):
+            console.print(f"[dim red]{step['stderr_tail']}[/dim red]")
+
+
+def _run_env_command(arg: str, ws: Path) -> None:
+    """REPL /env scan|plan dispatcher."""
+    parts = arg.split(maxsplit=1) if arg else []
+    sub = parts[0].lower() if parts else ""
+
+    if sub == "scan":
+        include_pkg = "--all" in (parts[1:] or [])
+        r = ToolRegistry.call_tool("scan_dependencies", {"include_packages": include_pkg})
+        try:
+            res = json.loads(r)
+        except (json.JSONDecodeError, TypeError):
+            console.print(f"[red]scan failed: {r}[/red]")
+            return
+        py = res.get("python_imports", [])
+        r_pkgs = res.get("r_packages", [])
+        console.print(f"[dim]files scanned: {res.get('files_scanned', 0)}[/dim]")
+        console.print(f"[bold]python:[/bold] {', '.join(py) if py else '(none)'}")
+        console.print(f"[bold]R:[/bold]      {', '.join(r_pkgs) if r_pkgs else '(none)'}")
+        return
+
+    if sub == "plan":
+        _interactive_env_plan(ws)
+        return
+
+    console.print(
+        "[dim]usage:\n"
+        "  /env scan [--all]   - scan script/ (and optionally packages/) for deps\n"
+        "  /env plan           - interactively plan a conda env from scanned deps[/dim]"
+    )
+
+
+def _interactive_env_plan(ws: Path) -> None:
+    scan = json.loads(ToolRegistry.call_tool("scan_dependencies", {"include_packages": False}))
+    py = scan.get("python_imports", [])
+    r_pkgs = scan.get("r_packages", [])
+    if not py and not r_pkgs:
+        console.print("[yellow]nothing to plan — no imports found in script/[/yellow]")
+        return
+
+    console.print(f"[bold]python deps:[/bold] {', '.join(py) if py else '(none)'}")
+    console.print(f"[bold]R deps:[/bold]      {', '.join(r_pkgs) if r_pkgs else '(none)'}")
+
+    try:
+        env_input = console.input(
+            "[yellow]target env (existing name, or 'new:<name>'): [/yellow]"
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+    if not env_input:
+        console.print("[dim]cancelled[/dim]")
+        return
+
+    create_new = env_input.startswith("new:")
+    target_env = env_input.split(":", 1)[1].strip() if create_new else env_input
+    if not target_env:
+        console.print("[red]empty env name[/red]")
+        return
+
+    py_ver = "3.11"
+    if create_new:
+        try:
+            v = console.input("[yellow]python version [3.11]: [/yellow]").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]cancelled[/dim]")
+            return
+        if v:
+            py_ver = v
+
+    plan_result = ToolRegistry.call_tool("plan_environment", {
+        "python_packages": py,
+        "r_packages": r_pkgs,
+        "target_env": target_env,
+        "python_version": py_ver,
+        "create_new": create_new,
+    })
+    parsed = json.loads(plan_result)
+    if parsed.get("error"):
+        console.print(f"[red]{parsed['error']}[/red]")
+        return
+
+    _show_plan_panels(parsed.get("plans", {}))
+    _prompt_and_apply_plan(parsed, target_env)
+
+
 def _make_client(mode: str = "base") -> ResearchLLMClient:
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
@@ -601,6 +790,9 @@ def _run_interactive(mode: str) -> None:
                 continue
             if cmd == "/package":
                 _run_package_command(arg, ws)
+                continue
+            if cmd == "/env":
+                _run_env_command(arg, ws)
                 continue
             if cmd == "/mode":
                 if arg not in ("base", "article", "blog", "book"):
