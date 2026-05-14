@@ -80,7 +80,7 @@ def list_workspace_tool(subdir: str, max_files: int) -> str:
 
 
 @tool(name="add_task", category="project")
-def add_task_tool(task_id: str, description: str, command: str, depends_on: list) -> str:
+def add_task_tool(task_id: str, description: str, command: str, depends_on: list[str]) -> str:
     """Add a task to the project task graph.
 
     Args:

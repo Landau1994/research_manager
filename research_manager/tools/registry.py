@@ -14,19 +14,23 @@ _REGISTRY: dict[str, dict[str, Any]] = {}
 
 
 def _python_type_to_json_schema(py_type: Any) -> dict[str, Any]:
+    # `items` is required by strict tool schemas (e.g. DeepSeek) for any array,
+    # so bare `list` falls back to array-of-strings rather than a barer schema.
     type_map = {
         str: {"type": "string"},
         int: {"type": "integer"},
         float: {"type": "number"},
         bool: {"type": "boolean"},
-        list: {"type": "array"},
-        dict: {"type": "object"},
+        list: {"type": "array", "items": {"type": "string"}},
+        dict: {"type": "object", "additionalProperties": True},
     }
     origin = getattr(py_type, "__origin__", None)
     if origin is not None:
         args = getattr(py_type, "__args__", ())
         if origin is list and args:
             return {"type": "array", "items": _python_type_to_json_schema(args[0])}
+        if origin is list:
+            return {"type": "array", "items": {"type": "string"}}
         import types
         if origin is types.UnionType or (hasattr(origin, "__name__") and origin.__name__ == "Union"):
             non_none = [a for a in args if a is not type(None)]

@@ -7,6 +7,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Phase 7 — External file access (2026-05-14):
+  - `research_manager/tools/external_access.py` — session-level whitelist for directories outside the workspace, seeded from `RM_EXTERNAL_READ_PATHS` env var and extensible via REPL
+  - `research_manager/tools/writing_tools.py` — new `read_external_file` and `list_external_allowed` tools; relaxed extension list for external reads (adds `.ipynb`, `.html`, `.toml`, `.cfg`, etc.)
+  - CLI: REPL commands `/allow <dir>`, `/allowed`, `/deny <dir>`; banner shows seeded external paths
+  - System prompt teaches the agent the approval protocol (do not retry blindly on a denied read)
+- Phase 6 — Project-specific tools (2026-05-14):
+  - `research_manager/tools/dynamic_tools.py` — `propose_script`, `save_proposed_script`, `revise_script`, `run_saved_script`, `list_proposals`
+  - Proposals are written to `res/_proposals/<id>.{py,R,sh}` with a sidecar `<id>.json` and cleaned up on promotion
+  - CLI: `_on_tool_call` intercepts `propose_script` results, shows a syntax-highlighted preview, and prompts `(y/N/edit/rename)` plus a follow-up overwrite/rename/cancel on name collisions
+  - CLI: `--auto-approve` flag for batch/CI sessions (skips proposal prompts; does NOT apply to external reads)
+- `easy-research clean [path]` subcommand — confirm-before-delete cleanup of workspace contents, preserving `.env` and `.env.example` (2026-05-14)
+- `init_workspace` now drops a `.env.example` into freshly initialized workspaces when no `.env` exists (2026-05-14)
+
+### Fixed
+- `easy-research` now finds `.env` relative to the user's current working directory rather than the installed `cli.py` location (`find_dotenv(usecwd=True)`) — previously the console script could fail with "OPENAI_API_KEY is not set" even when `.env` was present in the project directory (2026-05-14)
+- Tool-schema generator now emits valid `items` for arrays, including bare `list` annotations — DeepSeek's strict schema validator was rejecting `add_task.depends_on` for missing `items` (2026-05-14)
+
 - Phase 2–5 implementation (2026-05-14):
   - `research_manager/executor/runner.py` — subprocess runner with conda activation (`conda run -n <env>`), SIGTERM→SIGKILL on timeout, before/after file snapshot to detect new/modified files under `res/` and `report/`
   - `research_manager/tools/code_tools.py` — `run_python`, `run_r`, `run_shell` LLM tools

@@ -6,24 +6,29 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 
 from research_manager import __version__
-from research_manager.context import set_workspace
+from research_manager.context import get_workspace, set_workspace
 from research_manager.llm.client import ResearchLLMClient
 from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, writing_prompt_for
 from research_manager.tools import ToolRegistry  # noqa: F401  (triggers tool registration)
+from research_manager.tools import external_access
 from research_manager.workspace.manager import init_workspace, validate_workspace
 
 console = Console()
+
+_AUTO_APPROVE_PROPOSALS = False
 
 
 def _print_banner() -> None:
@@ -57,6 +62,9 @@ def _print_help() -> None:
         "  /tools          - list registered tools\n"
         "  /mode <kind>    - switch writing mode (base, article, blog, book)\n"
         "  /workspace      - show current workspace path\n"
+        "  /allow <dir>    - approve a directory for external file reads\n"
+        "  /allowed        - show approved external directories\n"
+        "  /deny <dir>     - revoke a previously approved directory\n"
         "  /reset          - clear conversation\n"
         "  /help           - show this help\n"
         "  /quit           - exit[/dim]"
@@ -68,6 +76,156 @@ def _on_tool_call(name: str, args: dict, result: str) -> None:
     if len(args) > 3:
         args_preview += ", ..."
     console.print(f"[dim cyan]→ tool[/dim cyan] [bold]{name}[/bold]([dim]{args_preview}[/dim])")
+    if name == "propose_script":
+        _handle_proposal(args, result)
+
+
+def _print_proposal_preview(args: dict, parsed: dict) -> None:
+    lang = parsed.get("language", "text")
+    syntax_lang = {"python": "python", "r": "r", "shell": "bash"}.get(lang, "text")
+    code = args.get("code", "")
+    if not code:
+        ws = get_workspace()
+        proposal_path = parsed.get("proposal_path")
+        if proposal_path:
+            try:
+                code = (ws / proposal_path).read_text(encoding="utf-8")
+            except OSError:
+                code = ""
+    if code:
+        console.print(
+            Panel(
+                Syntax(code, syntax_lang, line_numbers=True, theme="ansi_dark"),
+                title=f"proposal {parsed.get('proposal_id', '')} → script/{parsed.get('target_filename', '')}",
+                border_style="yellow",
+            )
+        )
+
+
+def _handle_proposal(args: dict, result: str) -> None:
+    try:
+        parsed = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not parsed.get("needs_user_confirmation"):
+        return
+
+    proposal_id = parsed.get("proposal_id")
+    target = parsed.get("target_filename", "")
+    if not proposal_id:
+        return
+
+    _print_proposal_preview(args, parsed)
+
+    if _AUTO_APPROVE_PROPOSALS:
+        _save_proposal(proposal_id, target, overwrite=False, prompt_on_conflict=False)
+        return
+
+    if not sys.stdin.isatty():
+        console.print(
+            f"[dim]proposal {proposal_id} left in res/_proposals/ "
+            "(non-interactive session — pass --auto-approve to save automatically)[/dim]"
+        )
+        return
+
+    try:
+        choice = console.input(
+            f"[bold yellow]save proposal {proposal_id} → script/{target}? "
+            "(y/N/edit/rename): [/bold yellow]"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]left in res/_proposals/[/dim]")
+        return
+
+    if choice in ("", "n", "no"):
+        console.print(f"[dim]kept proposal in res/_proposals/ (id: {proposal_id})[/dim]")
+        return
+
+    if choice in ("e", "edit"):
+        _edit_proposal(proposal_id)
+        _save_proposal(proposal_id, target, overwrite=False, prompt_on_conflict=True)
+        return
+
+    if choice in ("r", "rename"):
+        try:
+            new_name = console.input("[yellow]new filename: [/yellow]").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]cancelled[/dim]")
+            return
+        if not new_name:
+            console.print("[dim]cancelled[/dim]")
+            return
+        _save_proposal(proposal_id, new_name, overwrite=False, prompt_on_conflict=True)
+        return
+
+    if choice in ("y", "yes"):
+        _save_proposal(proposal_id, target, overwrite=False, prompt_on_conflict=True)
+        return
+
+    console.print(f"[yellow]unknown choice: {choice} — left in res/_proposals/[/yellow]")
+
+
+def _edit_proposal(proposal_id: str) -> None:
+    ws = get_workspace()
+    proposals_dir = ws / "res" / "_proposals"
+    matches = [p for p in proposals_dir.glob(f"{proposal_id}.*") if not p.name.endswith(".json")]
+    if not matches:
+        console.print(f"[red]proposal file not found for id {proposal_id}[/red]")
+        return
+    editor = os.environ.get("EDITOR", "vi")
+    try:
+        subprocess.run([editor, str(matches[0])], check=False)
+    except FileNotFoundError:
+        console.print(f"[red]editor not found: {editor}[/red]")
+
+
+def _save_proposal(
+    proposal_id: str,
+    target_name: str,
+    overwrite: bool,
+    prompt_on_conflict: bool,
+) -> None:
+    result = ToolRegistry.call_tool(
+        "save_proposed_script",
+        {"proposal_id": proposal_id, "target_name": target_name, "overwrite": overwrite},
+    )
+    try:
+        parsed = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        console.print(f"[red]save failed: {result}[/red]")
+        return
+
+    if parsed.get("ok"):
+        console.print(f"[green]saved → {parsed['saved_to']}[/green]")
+        return
+
+    err = parsed.get("error", "")
+    if "already exists" in err and prompt_on_conflict and sys.stdin.isatty():
+        try:
+            choice = console.input(
+                f"[yellow]script/{target_name} already exists — (o)verwrite / (r)ename / (c)ancel? [/yellow]"
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]cancelled[/dim]")
+            return
+        if choice in ("o", "overwrite"):
+            _save_proposal(proposal_id, target_name, overwrite=True, prompt_on_conflict=False)
+            return
+        if choice in ("r", "rename"):
+            try:
+                new_name = console.input("[yellow]new filename: [/yellow]").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]cancelled[/dim]")
+                return
+            if not new_name:
+                console.print("[dim]cancelled[/dim]")
+                return
+            _save_proposal(proposal_id, new_name, overwrite=False, prompt_on_conflict=True)
+            return
+        console.print("[dim]cancelled — proposal kept in res/_proposals/[/dim]")
+        return
+
+    console.print(f"[red]save failed: {err}[/red]")
 
 
 def _make_client(mode: str = "base") -> ResearchLLMClient:
@@ -103,6 +261,9 @@ def _run_interactive(mode: str) -> None:
         console.print(f"[dim]base_url: {client.base_url}[/dim]")
     console.print(f"[dim]workspace: {ws}[/dim]")
     console.print(f"[dim]mode: {mode}[/dim]")
+    seeded = external_access.allowed_dirs()
+    if seeded:
+        console.print(f"[dim]external read paths: {', '.join(seeded)}[/dim]")
     console.print("[dim]Type a message, or /help for commands.[/dim]\n")
 
     while True:
@@ -134,6 +295,33 @@ def _run_interactive(mode: str) -> None:
                 continue
             if cmd == "/workspace":
                 console.print(f"[dim]{ws}[/dim]")
+                continue
+            if cmd == "/allow":
+                if not arg:
+                    console.print("[yellow]usage: /allow <directory>[/yellow]")
+                    continue
+                try:
+                    resolved = external_access.add_allowed_dir(arg)
+                    console.print(f"[green]approved[/green] {resolved}")
+                except (FileNotFoundError, NotADirectoryError) as e:
+                    console.print(f"[red]{e}[/red]")
+                continue
+            if cmd == "/allowed":
+                dirs = external_access.allowed_dirs()
+                if not dirs:
+                    console.print("[dim](no external directories approved)[/dim]")
+                else:
+                    for d in dirs:
+                        console.print(f"[dim]  {d}[/dim]")
+                continue
+            if cmd == "/deny":
+                if not arg:
+                    console.print("[yellow]usage: /deny <directory>[/yellow]")
+                    continue
+                if external_access.remove_allowed_dir(arg):
+                    console.print(f"[green]revoked[/green] {arg}")
+                else:
+                    console.print(f"[dim]not in whitelist: {arg}[/dim]")
                 continue
             if cmd == "/mode":
                 if arg not in ("base", "article", "blog", "book"):
@@ -218,6 +406,50 @@ def _run_batch(file_path: str, output_dir: str, workers: int, mode: str) -> None
     console.print(f"[green]done[/green] — {sum(1 for s in summary if s['ok'])}/{len(summary)} succeeded")
 
 
+def _run_clean(path: str) -> None:
+    target = Path(path).resolve()
+    if not target.exists():
+        console.print(f"[red]error:[/red] path does not exist: {target}")
+        sys.exit(1)
+
+    entries = [e for e in target.iterdir() if e.name not in (".env", ".env.example")]
+    if not entries:
+        console.print("[dim]nothing to clean[/dim]")
+        return
+
+    dirs = sorted(e for e in entries if e.is_dir())
+    files = sorted(e for e in entries if not e.is_dir())
+
+    console.print(f"[bold yellow]will delete everything under:[/bold yellow] {target}\n")
+    if dirs:
+        console.print("[bold]directories:[/bold]")
+        for d in dirs:
+            console.print(f"  [red]{d.name}/[/red]")
+    if files:
+        console.print("[bold]files:[/bold]")
+        for f in files:
+            console.print(f"  [red]{f.name}[/red]")
+    console.print(f"\n[dim](.env and .env.example will be preserved)[/dim]")
+
+    try:
+        answer = console.input("\n[bold yellow]confirm? (y/N): [/bold yellow]").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+
+    if answer not in ("y", "yes"):
+        console.print("[dim]cancelled[/dim]")
+        return
+
+    import shutil
+    for entry in entries:
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    console.print(f"[green]cleaned[/green] {len(dirs)} directories, {len(files)} files")
+
+
 def _run_init(path: str, force: bool) -> None:
     target = Path(path).resolve()
     result = init_workspace(target, force=force)
@@ -226,6 +458,12 @@ def _run_init(path: str, force: bool) -> None:
         console.print(f"[dim]created: {', '.join(result['created'])}[/dim]")
     if result["existed"]:
         console.print(f"[dim]existed: {', '.join(result['existed'])}[/dim]")
+    env_file = target / ".env"
+    if not env_file.exists():
+        console.print(
+            "\n[yellow]hint:[/yellow] copy .env.example to .env and set your OPENAI_API_KEY "
+            "before running the agent."
+        )
 
 
 def _run_validate(path: str) -> None:
@@ -238,7 +476,13 @@ def _run_validate(path: str) -> None:
 
 
 def main() -> None:
-    load_dotenv()
+    # Search for .env starting from the current working directory upward,
+    # not from the cli.py module location (which is where dotenv defaults to
+    # when invoked from an installed console script).
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path:
+        load_dotenv(dotenv_path)
+    external_access.init_from_env()
 
     parser = argparse.ArgumentParser(
         prog="easy-research",
@@ -255,6 +499,10 @@ def main() -> None:
     p_val = sub.add_parser("validate", help="Validate workspace structure")
     p_val.add_argument("path", nargs="?", default=".", help="Workspace path (default: current dir)")
 
+    # clean
+    p_clean = sub.add_parser("clean", help="Remove all files and directories in the workspace")
+    p_clean.add_argument("path", nargs="?", default=".", help="Workspace path (default: current dir)")
+
     # batch
     p_batch = sub.add_parser("batch", help="Run a batch of questions from a file")
     p_batch.add_argument("file", help="File with questions separated by lines containing only ---")
@@ -268,15 +516,23 @@ def main() -> None:
     parser.add_argument("-o", "--output", default="", help="Save response to this path.")
     parser.add_argument("-m", "--mode", default="base", choices=["base", "article", "blog", "book"],
                         help="Writing mode (default: base).")
+    parser.add_argument("--auto-approve", action="store_true",
+                        help="Auto-save script proposals without prompting (for batch/CI sessions).")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
+
+    global _AUTO_APPROVE_PROPOSALS
+    _AUTO_APPROVE_PROPOSALS = bool(getattr(args, "auto_approve", False))
 
     if args.command == "init":
         _run_init(args.path, force=args.force)
         return
     if args.command == "validate":
         _run_validate(args.path)
+        return
+    if args.command == "clean":
+        _run_clean(args.path)
         return
     if args.command == "batch":
         _run_batch(args.file, output_dir=args.output, workers=args.workers, mode=args.mode)

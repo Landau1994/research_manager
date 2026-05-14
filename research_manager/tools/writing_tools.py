@@ -6,10 +6,15 @@ import json
 from pathlib import Path
 
 from research_manager.context import get_workspace
+from research_manager.tools import external_access
 from research_manager.tools.registry import tool
 
 _REPORT_KINDS = {"article", "blog", "book"}
 _TEXT_EXT = {".md", ".txt", ".rst", ".tex", ".csv", ".tsv", ".log", ".json", ".yaml", ".yml", ".py", ".r", ".R", ".sh"}
+_EXTERNAL_TEXT_EXT = _TEXT_EXT | {
+    ".ipynb", ".html", ".xml", ".toml", ".cfg", ".ini", ".conf",
+    ".bib", ".lock", ".env", "", ".dockerfile", ".gitignore",
+}
 
 
 def _safe_under(workspace: Path, target: Path) -> bool:
@@ -66,6 +71,62 @@ def read_text_file(path: str, max_chars: int) -> str:
         text = text[:max_chars]
         truncated = True
     return json.dumps({"path": str(target.relative_to(ws)), "content": text, "truncated": truncated}, ensure_ascii=False)
+
+
+@tool(name="read_external_file", category="writing")
+def read_external_file(path: str, max_chars: int) -> str:
+    """Read a text file from outside the workspace.
+
+    The path must lie under a directory that has been pre-approved by the user
+    (via the `RM_EXTERNAL_READ_PATHS` env var or the REPL `/allow <dir>` command).
+    If the path is not approved, this tool returns an error — instruct the user
+    to run `/allow <directory>` and then retry.
+
+    Args:
+        path: Absolute or user-relative (`~/...`) path to a text file outside the workspace.
+        max_chars: Maximum characters to return (truncated with notice if exceeded).
+    """
+    target = Path(path).expanduser().resolve()
+    if not external_access.is_allowed(target):
+        return json.dumps(
+            {
+                "error": "external path not in approved list",
+                "path": str(target),
+                "approved_dirs": external_access.allowed_dirs(),
+                "hint": (
+                    "Ask the user to run `/allow <directory>` in the REPL "
+                    "(or set RM_EXTERNAL_READ_PATHS) before retrying."
+                ),
+            },
+            ensure_ascii=False,
+        )
+    if not target.exists():
+        return json.dumps({"error": f"file not found: {target}"}, ensure_ascii=False)
+    if not target.is_file():
+        return json.dumps({"error": f"not a file: {target}"}, ensure_ascii=False)
+    if target.suffix.lower() not in _EXTERNAL_TEXT_EXT and target.name.lower() not in {"makefile", "dockerfile"}:
+        return json.dumps(
+            {"error": f"refusing to read non-text extension {target.suffix!r}"},
+            ensure_ascii=False,
+        )
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    truncated = False
+    if len(text) > max_chars:
+        text = text[:max_chars]
+        truncated = True
+    return json.dumps(
+        {"path": str(target), "content": text, "truncated": truncated},
+        ensure_ascii=False,
+    )
+
+
+@tool(name="list_external_allowed", category="writing")
+def list_external_allowed() -> str:
+    """List directories the user has approved for external file reads."""
+    return json.dumps({"approved_dirs": external_access.allowed_dirs()}, ensure_ascii=False)
 
 
 @tool(name="write_report", category="writing")

@@ -34,6 +34,7 @@ Each project follows this structure:
 5. Surface failures clearly rather than papering over them.
 6. Use Markdown for narrative responses; reserve LaTeX for math.
 7. When a script produces new files, mention them so the user knows where to find them.
+8. To read files outside the workspace, use `read_external_file`. It only works for paths under directories the user has pre-approved. If a read is denied, do not retry blindly — tell the user the path you need and ask them to run `/allow <directory>` in the REPL, then resume. Use `list_external_allowed` if you are unsure what is currently permitted.
 
 ## Output
 

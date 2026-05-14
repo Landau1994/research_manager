@@ -11,6 +11,26 @@ REPORT_KINDS = ["article", "blog", "book"]
 
 _STATE_FILENAME = ".research_manager_state.json"
 
+_ENV_EXAMPLE_CONTENT = """\
+# Copy this file to .env and fill in your values
+
+# Required
+OPENAI_API_KEY=your-api-key-here
+
+# Optional: API endpoint (defaults to DeepSeek)
+# OPENAI_BASE_URL=https://api.deepseek.com/beta
+
+# Optional: model name (defaults to deepseek-v4-pro)
+# RM_MODEL=deepseek-v4-pro
+
+# Optional: tuning
+# RM_MAX_TOKENS=8192
+# RM_MAX_ITERATIONS=30
+# RM_TEMPERATURE=0.0
+# RM_REASONING_EFFORT=high
+# RM_TOOL_TIMEOUT=300
+"""
+
 
 def init_workspace(path: str | Path, force: bool = False) -> dict:
     """Create the standard directory structure at `path`.
@@ -41,6 +61,12 @@ def init_workspace(path: str | Path, force: bool = False) -> dict:
     state_path = root / _STATE_FILENAME
     if not state_path.exists() or force:
         state_path.write_text(json.dumps({"version": 1, "tasks": []}, indent=2), encoding="utf-8")
+
+    env_file = root / ".env"
+    env_example = root / ".env.example"
+    if not env_file.exists() and not env_example.exists():
+        env_example.write_text(_ENV_EXAMPLE_CONTENT, encoding="utf-8")
+        created.append(".env.example")
 
     return {
         "workspace": str(root),
