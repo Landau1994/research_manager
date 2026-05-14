@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "research-manager"
+version = "0.1.0"
+description = "LLM agent that manages research projects: executes analysis code and drafts papers, books, and blogs"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30",
+    "rich>=13.0",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+easy-research = "research_manager.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["research_manager*"]
