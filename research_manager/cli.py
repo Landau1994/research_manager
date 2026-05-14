@@ -66,6 +66,7 @@ def _print_help() -> None:
         "  /allow <dir>    - approve a directory for external file reads\n"
         "  /allowed        - show approved external directories\n"
         "  /deny <dir>     - revoke a previously approved directory\n"
+        "  /package <name> - build a pip-installable package from scripts\n"
         "  /sessions       - list saved and auto-saved sessions\n"
         "  /save [name]    - save current conversation (permanent)\n"
         "  /load <name>    - load a session (e.g. 'auto-0' or a saved name)\n"
@@ -82,6 +83,8 @@ def _on_tool_call(name: str, args: dict, result: str) -> None:
     console.print(f"[dim cyan]→ tool[/dim cyan] [bold]{name}[/bold]([dim]{args_preview}[/dim])")
     if name == "propose_script":
         _handle_proposal(args, result)
+    if name == "build_package":
+        _handle_package_confirmation(result)
 
 
 def _print_proposal_preview(args: dict, parsed: dict) -> None:
@@ -230,6 +233,188 @@ def _save_proposal(
         return
 
     console.print(f"[red]save failed: {err}[/red]")
+
+
+def _handle_package_confirmation(result: str) -> None:
+    """Intercept build_package tool result and prompt user for confirmation."""
+    try:
+        parsed = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not parsed.get("needs_user_confirmation"):
+        return
+
+    pkg_name = parsed.get("package_name", "")
+    manifest = parsed.get("manifest", [])
+    if not pkg_name or not manifest:
+        return
+
+    console.print(
+        Panel(
+            "\n".join(f"  {f}" for f in manifest),
+            title=f"package: {pkg_name}",
+            border_style="yellow",
+        )
+    )
+
+    if _AUTO_APPROVE_PROPOSALS:
+        _do_confirm_package(parsed)
+        return
+
+    if not sys.stdin.isatty():
+        console.print("[dim]package build pending (non-interactive session)[/dim]")
+        return
+
+    try:
+        choice = console.input(
+            f"[bold yellow]build package '{pkg_name}'? (y/N): [/bold yellow]"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+
+    if choice in ("y", "yes"):
+        _do_confirm_package(parsed)
+    else:
+        console.print("[dim]cancelled[/dim]")
+
+
+def _do_confirm_package(parsed: dict) -> None:
+    r = ToolRegistry.call_tool("confirm_package_build", {
+        "package_name": parsed["package_name"],
+        "scripts": parsed.get("scripts", []),
+        "description": parsed.get("description", ""),
+        "version": parsed.get("version", "0.1.0"),
+        "dependencies": parsed.get("dependencies", []),
+        "overwrite": False,
+    })
+    try:
+        res = json.loads(r)
+    except (json.JSONDecodeError, TypeError):
+        console.print(f"[red]build failed: {r}[/red]")
+        return
+    if res.get("ok"):
+        console.print(f"[green]built → {res['package_path']}/[/green]")
+        for f in res.get("files_created", []):
+            console.print(f"[dim]  {f}[/dim]")
+        console.print(f"[dim]install: {res.get('install_hint', '')}[/dim]")
+    else:
+        console.print(f"[red]build failed: {res.get('error', '')}[/red]")
+
+
+def _run_package_command(name: str, ws: Path) -> None:
+    """Interactive /package <name> flow."""
+    if not name:
+        console.print("[yellow]usage: /package <name>[/yellow]")
+        return
+
+    script_dir = ws / "script"
+    if not script_dir.exists():
+        console.print("[red]no script/ directory in workspace[/red]")
+        return
+
+    py_scripts = sorted(f.name for f in script_dir.iterdir() if f.is_file() and f.suffix == ".py")
+    if not py_scripts:
+        console.print("[yellow]no .py scripts found in script/[/yellow]")
+        return
+
+    console.print("[dim]scripts in workspace:[/dim]")
+    for i, s in enumerate(py_scripts, 1):
+        console.print(f"  [green]{i}.[/green] {s}")
+
+    try:
+        sel = console.input(
+            "[bold yellow]include which scripts? (comma-separated numbers, 'all', or 'none'): [/bold yellow]"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+
+    if sel == "all":
+        selected = py_scripts[:]
+    elif sel in ("none", ""):
+        selected = []
+    else:
+        try:
+            indices = [int(x.strip()) for x in sel.split(",")]
+            selected = [py_scripts[i - 1] for i in indices if 1 <= i <= len(py_scripts)]
+        except (ValueError, IndexError):
+            console.print("[red]invalid selection[/red]")
+            return
+
+    try:
+        desc = console.input("[yellow]description: [/yellow]").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+
+    try:
+        deps_raw = console.input("[yellow]dependencies (comma-separated, or empty): [/yellow]").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+    deps = [d.strip() for d in deps_raw.split(",") if d.strip()] if deps_raw else []
+
+    console.print(f"\n[dim]package: {name}[/dim]")
+    console.print(f"[dim]scripts: {selected or '(none)'}[/dim]")
+    console.print(f"[dim]deps: {deps or '(none)'}[/dim]")
+
+    try:
+        confirm = console.input("[bold yellow]build? (y/N): [/bold yellow]").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]cancelled[/dim]")
+        return
+
+    if confirm not in ("y", "yes"):
+        console.print("[dim]cancelled[/dim]")
+        return
+
+    r = ToolRegistry.call_tool("confirm_package_build", {
+        "package_name": name,
+        "scripts": selected,
+        "description": desc or f"Package {name}",
+        "version": "0.1.0",
+        "dependencies": deps,
+        "overwrite": False,
+    })
+    try:
+        res = json.loads(r)
+    except (json.JSONDecodeError, TypeError):
+        console.print(f"[red]build failed: {r}[/red]")
+        return
+    if res.get("ok"):
+        console.print(f"\n[green]built → {res['package_path']}/[/green]")
+        for f in res.get("files_created", []):
+            console.print(f"[dim]  {f}[/dim]")
+        console.print(f"\n[dim]{res.get('install_hint', '')}[/dim]")
+    else:
+        err = res.get("error", "")
+        if "already exists" in err:
+            try:
+                ow = console.input("[yellow]package exists — overwrite? (y/N): [/yellow]").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]cancelled[/dim]")
+                return
+            if ow in ("y", "yes"):
+                r2 = ToolRegistry.call_tool("confirm_package_build", {
+                    "package_name": name,
+                    "scripts": selected,
+                    "description": desc or f"Package {name}",
+                    "version": "0.1.0",
+                    "dependencies": deps,
+                    "overwrite": True,
+                })
+                res2 = json.loads(r2)
+                if res2.get("ok"):
+                    console.print(f"\n[green]rebuilt → {res2['package_path']}/[/green]")
+                    for f in res2.get("files_created", []):
+                        console.print(f"[dim]  {f}[/dim]")
+                else:
+                    console.print(f"[red]{res2.get('error', '')}[/red]")
+            else:
+                console.print("[dim]cancelled[/dim]")
+        else:
+            console.print(f"[red]build failed: {err}[/red]")
 
 
 def _make_client(mode: str = "base") -> ResearchLLMClient:
@@ -413,6 +598,9 @@ def _run_interactive(mode: str) -> None:
                     console.print(f"[green]revoked[/green] {arg}")
                 else:
                     console.print(f"[dim]not in whitelist: {arg}[/dim]")
+                continue
+            if cmd == "/package":
+                _run_package_command(arg, ws)
                 continue
             if cmd == "/mode":
                 if arg not in ("base", "article", "blog", "book"):

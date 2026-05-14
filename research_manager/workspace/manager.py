@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-WORKSPACE_DIRS = ["data", "script", "res", "report"]
+WORKSPACE_DIRS = ["data", "script", "res", "report", "packages"]
 RES_SUBDIRS = ["fig", "h5ad", "python_obj", "r_obj", "txt"]
 REPORT_KINDS = ["article", "blog", "book"]
 
