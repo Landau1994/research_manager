@@ -67,10 +67,11 @@ project_dir/
 │   ├── python_obj/    # Serialized Python objects
 │   ├── r_obj/         # Serialized R objects
 │   └── txt/           # Text-based results (tables, logs)
-└── report/            # Final outputs
-    ├── article/       # Academic paper drafts
-    ├── blog/          # Blog posts
-    └── book/          # Book chapters/manuscripts
+├── report/            # Final outputs
+│   ├── article/       # Academic paper drafts
+│   ├── blog/          # Blog posts
+│   └── book/          # Book chapters/manuscripts
+└── packages/          # Generated pip-installable packages
 ```
 
 ## Architecture
@@ -89,11 +90,13 @@ research_manager/
 │   │   ├── writing_tools.py   # list_results, read_text_file, read_external_file, write_report, ...
 │   │   ├── project_tools.py   # init_project, list_workspace, add_task, ...
 │   │   ├── dynamic_tools.py   # propose_script, save_proposed_script, revise_script, run_saved_script
+│   │   ├── package_tools.py   # build_package, confirm_package_build
 │   │   └── external_access.py # session whitelist for read_external_file
 │   ├── planner/
 │   │   └── task_graph.py      # DAG with cycle detection and topological sort
 │   ├── workspace/
 │   │   └── manager.py         # init/validate workspace, persist task state
+│   ├── sessions.py            # Auto-save (3 rotating slots) + manual save/load
 │   ├── context.py             # Current workspace path (shared runtime context)
 │   └── cli.py                 # REPL, single-question, batch, init, validate, clean
 ├── examples/quickstart.md
@@ -155,7 +158,7 @@ easy-research batch questions.md -w 4  # parallel batch mode
 easy-research --auto-approve ...       # skip script-proposal prompts
 ```
 
-REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/reset`, `/help`, `/quit`.
+REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/package <name>`, `/sessions`, `/save [name]`, `/load <name>`, `/reset`, `/help`, `/quit`.
 
 ### Reading files outside the workspace
 
@@ -287,8 +290,58 @@ adds opt-in access to specific external directories.
 - Approval is **per directory subtree** — approving `/tmp/ext_data` does not
   approve `/tmp/secret.txt`.
 - `--auto-approve` does **not** apply here: external reads always require
-  explicit pre-approval. Reading is a higher-risk action than writing into
-  the workspace, and we'd rather have the user list trusted roots.
+  explicit pre-approval.
+
+### Phase 8: Package Builder ✅
+
+Promote workspace scripts into pip-installable Python packages under
+`packages/<name>/`.
+
+Tools (category `dynamic`):
+
+- **`build_package(package_name, description, scripts, version, dependencies)`**
+  — validates inputs and returns a file manifest for user confirmation (no
+  files written yet). Returns `needs_user_confirmation: true`.
+- **`confirm_package_build(..., overwrite)`** — writes the full package
+  structure: `pyproject.toml` (setuptools src-layout), `src/<name>/` with
+  copied scripts and `__init__.py`, `README.md`, `tests/` with a stub.
+
+REPL command `/package <name>`:
+```
+you > /package my_analysis
+scripts in workspace:
+  1. clean.py
+  2. utils.py
+include which scripts? (comma-separated numbers, 'all', or 'none'): all
+description: Analysis utilities
+dependencies (comma-separated, or empty): numpy>=1.24
+build? (y/N): y
+
+built → packages/my_analysis/
+```
+
+LLM tool-call path: `_on_tool_call` intercepts `build_package` results, shows
+the manifest panel, prompts y/N, and calls `confirm_package_build` on approval.
+
+If the package already exists, the user is offered overwrite (with backup) or
+cancel.
+
+### Phase 9: Session Persistence ✅
+
+Conversations are automatically saved and can be manually preserved or restored.
+
+- **Auto-save**: 3 rotating slots under
+  `.research_manager_sessions/auto/slot_{0,1,2}.json`. The oldest slot is
+  recycled on each new session. Written after every successful chat turn.
+- **Manual save**: `/save [name]` writes to
+  `.research_manager_sessions/saved/<name>.json`. These are never
+  auto-deleted or overwritten.
+- **Load**: `/load <name>` restores messages and mode (accepts `auto-0`
+  through `auto-2` or any saved name).
+- **`/sessions`**: lists all available sessions with turn count, model, mode,
+  and last-updated timestamp.
+- **Exit prompt**: on `/quit` or Ctrl-C/Ctrl-D, if the conversation has user
+  turns, the REPL asks whether to manually save before exiting.
 
 ### Completed
 - [x] Define workspace directory structure (`demo_work_dir/`) — 2026-05-14
@@ -300,6 +353,8 @@ adds opt-in access to specific external directories.
 - [x] Phase 5 — Polish (batch mode, examples) — 2026-05-14
 - [x] Phase 6 — Project-specific tools (propose/save/revise/run dynamic scripts) — 2026-05-14
 - [x] Phase 7 — External file access (read_external_file + whitelist) — 2026-05-14
+- [x] Phase 8 — Package builder (build_package + /package command) — 2026-05-14
+- [x] Phase 9 — Session persistence (auto-save, /save, /load, /sessions) — 2026-05-14
 - [x] `easy-research clean` subcommand and `.env.example` auto-generation in `init` — 2026-05-14
 - [x] `.env` discovery fixed for installed console script (use cwd, not module path) — 2026-05-14
 - [x] Tool-schema generator now emits valid `items` for bare `list` annotations — 2026-05-14
@@ -310,7 +365,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## Status
 
-Phases 1–7 implemented. The CLI installs as `easy-research` and exposes 21 LLM-callable tools across `code`, `writing`, `project`, and `dynamic` categories.
+Phases 1–9 implemented. The CLI installs as `easy-research` and exposes 23 LLM-callable tools across `code`, `writing`, `project`, and `dynamic` categories.
 
 ## License
 
