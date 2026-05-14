@@ -22,6 +22,7 @@ from research_manager import __version__
 from research_manager.context import get_workspace, set_workspace
 from research_manager.llm.client import ResearchLLMClient
 from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, writing_prompt_for
+from research_manager.sessions import auto_save, list_sessions, load_session, manual_save, pick_auto_slot
 from research_manager.tools import ToolRegistry  # noqa: F401  (triggers tool registration)
 from research_manager.tools import external_access
 from research_manager.workspace.manager import init_workspace, validate_workspace
@@ -65,6 +66,9 @@ def _print_help() -> None:
         "  /allow <dir>    - approve a directory for external file reads\n"
         "  /allowed        - show approved external directories\n"
         "  /deny <dir>     - revoke a previously approved directory\n"
+        "  /sessions       - list saved and auto-saved sessions\n"
+        "  /save [name]    - save current conversation (permanent)\n"
+        "  /load <name>    - load a session (e.g. 'auto-0' or a saved name)\n"
         "  /reset          - clear conversation\n"
         "  /help           - show this help\n"
         "  /quit           - exit[/dim]"
@@ -251,16 +255,68 @@ def _do_chat(client: ResearchLLMClient, user_input: str) -> str:
     return response
 
 
+def _has_user_turns(messages: list[dict]) -> bool:
+    return any(m.get("role") == "user" for m in messages)
+
+
+def _ask_save_on_exit(client: ResearchLLMClient, ws: Path, mode: str) -> None:
+    """Prompt the user to manually save the conversation before exiting."""
+    if not _has_user_turns(client.messages):
+        return
+    if not sys.stdin.isatty():
+        return
+    try:
+        choice = console.input(
+            "[yellow]save this conversation before exiting? (y/N): [/yellow]"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if choice not in ("y", "yes"):
+        return
+    try:
+        name = console.input("[yellow]name (leave blank for timestamp): [/yellow]").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    sp = manual_save(ws, name, client.messages, model=client.model, mode=mode)
+    console.print(f"[green]saved → {sp.relative_to(ws)}[/green]")
+
+
+def _print_sessions(ws: Path) -> None:
+    info = list_sessions(ws)
+    table = Table(title="Sessions", show_header=True, header_style="bold cyan")
+    table.add_column("Name", style="green")
+    table.add_column("Updated", style="dim")
+    table.add_column("Model", style="dim")
+    table.add_column("Mode", style="dim")
+    table.add_column("Turns", justify="right")
+    for slot in info["auto"]:
+        if slot is None:
+            continue
+        table.add_row(
+            slot["slot"], slot["updated_at"][:19], slot["model"],
+            slot["mode"], str(slot["turns"]),
+        )
+    for s in info["saved"]:
+        table.add_row(
+            s["name"], s["updated_at"][:19], s["model"],
+            s["mode"], str(s["turns"]),
+        )
+    console.print(table)
+
+
 def _run_interactive(mode: str) -> None:
     _print_banner()
     client = _make_client(mode=mode)
     ws = set_workspace(Path.cwd())
+
+    auto_slot = pick_auto_slot(ws)
 
     console.print(f"[dim]model: {client.model}[/dim]")
     if client.base_url:
         console.print(f"[dim]base_url: {client.base_url}[/dim]")
     console.print(f"[dim]workspace: {ws}[/dim]")
     console.print(f"[dim]mode: {mode}[/dim]")
+    console.print(f"[dim]session auto-save: slot {auto_slot}[/dim]")
     seeded = external_access.allowed_dirs()
     if seeded:
         console.print(f"[dim]external read paths: {', '.join(seeded)}[/dim]")
@@ -270,7 +326,9 @@ def _run_interactive(mode: str) -> None:
         try:
             user_input = console.input("[bold green]you > [/bold green]").strip()
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]bye[/dim]")
+            console.print()
+            _ask_save_on_exit(client, ws, mode)
+            console.print("[dim]bye[/dim]")
             break
 
         if not user_input:
@@ -281,6 +339,7 @@ def _run_interactive(mode: str) -> None:
             cmd = parts[0].lower()
             arg = parts[1].strip() if len(parts) > 1 else ""
             if cmd in ("/quit", "/exit", "/q"):
+                _ask_save_on_exit(client, ws, mode)
                 console.print("[dim]bye[/dim]")
                 break
             if cmd == "/tools":
@@ -288,13 +347,45 @@ def _run_interactive(mode: str) -> None:
                 continue
             if cmd in ("/reset", "/clear"):
                 client.reset()
-                console.print("[dim]conversation reset[/dim]")
+                auto_slot = pick_auto_slot(ws)
+                console.print(f"[dim]conversation reset (new auto-save slot: {auto_slot})[/dim]")
                 continue
             if cmd == "/help":
                 _print_help()
                 continue
             if cmd == "/workspace":
                 console.print(f"[dim]{ws}[/dim]")
+                continue
+            if cmd == "/sessions":
+                _print_sessions(ws)
+                continue
+            if cmd == "/save":
+                if not _has_user_turns(client.messages):
+                    console.print("[dim]nothing to save (no conversation yet)[/dim]")
+                    continue
+                sp = manual_save(ws, arg, client.messages, model=client.model, mode=mode)
+                console.print(f"[green]saved → {sp.relative_to(ws)}[/green]")
+                continue
+            if cmd == "/load":
+                if not arg:
+                    console.print("[yellow]usage: /load <name> (e.g. 'auto-0' or a saved name)[/yellow]")
+                    continue
+                data = load_session(ws, arg)
+                if data is None:
+                    console.print(f"[red]session not found: {arg}[/red]")
+                    continue
+                client.messages = data.get("messages", [])
+                loaded_mode = data.get("mode", mode)
+                if loaded_mode != mode:
+                    new_prompt = BASE_SYSTEM_PROMPT if loaded_mode == "base" else writing_prompt_for(loaded_mode)
+                    client.system_prompt = new_prompt
+                    mode = loaded_mode
+                auto_slot = pick_auto_slot(ws)
+                turns = len([m for m in client.messages if m.get("role") == "user"])
+                console.print(
+                    f"[green]loaded session '{arg}'[/green] "
+                    f"[dim]({turns} turns, mode={loaded_mode})[/dim]"
+                )
                 continue
             if cmd == "/allow":
                 if not arg:
@@ -329,6 +420,7 @@ def _run_interactive(mode: str) -> None:
                     continue
                 new_prompt = BASE_SYSTEM_PROMPT if arg == "base" else writing_prompt_for(arg)
                 client.set_system_prompt(new_prompt)
+                mode = arg
                 console.print(f"[dim]switched to mode: {arg}[/dim]")
                 continue
             console.print(f"[yellow]unknown command: {cmd}[/yellow]")
@@ -336,6 +428,7 @@ def _run_interactive(mode: str) -> None:
 
         try:
             _do_chat(client, user_input)
+            auto_save(ws, auto_slot, client.messages, model=client.model, mode=mode)
         except KeyboardInterrupt:
             console.print("\n[yellow]interrupted[/yellow]")
         except Exception as e:  # noqa: BLE001
