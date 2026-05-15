@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Nature-style article-mode upgrade (2026-05-15):
+  - `research_manager/llm/prompts.py` — `ARTICLE_WRITING_PROMPT` rewritten to embed an argument-first / hourglass / paper-type-aware workflow distilled from the `nature-skills` instruction bundles (writing + polishing). Includes intake gates (core claim / evidence / boundary), section-specific defaults (abstract/intro/methods/results/discussion/conclusion/title), paragraph rules, and verb calibration ladder. `BLOG_WRITING_PROMPT` and `BOOK_WRITING_PROMPT` are deliberately left unchanged — Nature conventions would distort their register.
+  - `research_manager/tools/writing_tools.py` — three new tools, all marked **article-mode only** in their docstrings so the LLM does not invoke them in blog/book mode:
+    - `polish_text(text, focus)` — returns a focus-specific (abstract/introduction/methods/results/discussion/conclusion/title/general) rule set, paragraph self-check, and a structured instruction for the LLM to consume in its next turn. Deterministic; no network, no LLM-in-tool.
+    - `add_citations(text, scope)` — segments prose into sentences, grades each as `primary_claim` / `qualitative_claim` / `quantitative_statement` / `background_or_transition`, emits an English search-query hint per claim, and attaches the scope-specific journal whitelist (Nature flagship, Nature family, CNS, CNS family, any-journal). Does not search the web — the LLM uses the worksheet to propose citations.
+    - `data_availability(notes, journal)` — returns a Nature-policy Data Availability scaffold with explicit `[TODO: ...]` placeholders for DOIs/accessions/owners (never invented), the access-class taxonomy, and the FAIR/policy checklist.
+  - Tool count: 26 → 29
 - Phase 10 — Conda environment setup (2026-05-14):
   - `research_manager/tools/env_tools.py` — three new tools (category `dynamic`):
     - `scan_dependencies(include_packages)` — AST-based parsing of `script/*.py` for top-level imports (stdlib filtered via `sys.stdlib_module_names`) and regex-based parsing of `script/*.R` / `.r` for `library()` / `require()` calls; optional walk into `packages/*/src/`

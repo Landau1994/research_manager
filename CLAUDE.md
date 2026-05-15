@@ -32,7 +32,7 @@ Project-level instructions for Claude Code sessions working on this repository.
 
 ## Current State
 
-Phases 1–10 complete. 26 LLM-callable tools registered across `code`, `writing`, `project`, and `dynamic` categories.
+Phases 1–10 complete. 29 LLM-callable tools registered across `code`, `writing`, `project`, and `dynamic` categories. Article writing mode is tuned to Nature/Nature Communications conventions (argument-first prompt + `polish_text` / `add_citations` / `data_availability` helpers). Blog and book modes are intentionally not Nature-tuned.
 
 Key components:
 - `executor/runner.py` — subprocess runner with `conda run -n <env>`, SIGTERM/SIGKILL, before/after file diff

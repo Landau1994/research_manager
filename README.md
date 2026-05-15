@@ -87,7 +87,7 @@ research_manager/
 │   ├── tools/
 │   │   ├── registry.py        # @tool decorator + auto JSON-schema generation
 │   │   ├── code_tools.py      # run_python, run_r, run_shell
-│   │   ├── writing_tools.py   # list_results, read_text_file, read_external_file, write_report, ...
+│   │   ├── writing_tools.py   # list_results, read_text_file, write_report, polish_text, add_citations, data_availability, ...
 │   │   ├── project_tools.py   # init_project, list_workspace, add_task, ...
 │   │   ├── dynamic_tools.py   # propose_script, save_proposed_script, revise_script, run_saved_script
 │   │   ├── package_tools.py   # build_package, confirm_package_build
@@ -201,6 +201,7 @@ See [examples/quickstart.md](examples/quickstart.md) for a walkthrough.
 - [x] Result-aware context injection (list_results, read_text_file tools)
 - [x] Section-by-section drafting (write_report / append_report)
 - [x] Markdown output to `report/{article,blog,book}/`
+- [x] Nature-style upgrade for **article mode only**: argument-first prompt + three helper tools (`polish_text`, `add_citations`, `data_availability`) distilled from the `nature-skills` instruction bundles. Blog and book modes are unchanged because Nature conventions would distort their register.
 
 ### Phase 4: Project Management ✅
 - [x] Workspace initialization (`easy-research init`) and validation
@@ -413,7 +414,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## Status
 
-Phases 1–10 implemented. The CLI installs as `easy-research` and exposes 26 LLM-callable tools across `code`, `writing`, `project`, and `dynamic` categories.
+Phases 1–10 implemented. The CLI installs as `easy-research` and exposes 29 LLM-callable tools across `code`, `writing`, `project`, and `dynamic` categories. Article-mode prompt and helpers are tuned to Nature/Nature Communications writing patterns (argument-first, hourglass, bounded claims).
 
 ## License
 
