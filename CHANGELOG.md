@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Schema-level mode gating for article-only tools (2026-05-16):
+  - `research_manager/llm/prompts.py` — `ARTICLE_ONLY_TOOLS = {polish_text, add_citations, data_availability}` and `excluded_tools_for(mode)` helper. Returns the gated set for `blog` / `book` / `base`, empty for `article`.
+  - `research_manager/llm/client.py` — `ResearchLLMClient.excluded_tools` field and `set_excluded_tools()` method; `get_tools()` filters the registry schemas before sending to the LLM, so gated tools are not even visible to the model in non-article modes.
+  - `research_manager/cli.py` — wired `excluded_tools_for(mode)` into `_make_client`, `/mode <name>`, `/load` (when the loaded session's mode differs), and `_batch_worker`. The `/mode` switch now prints the hidden-tool list.
+  - Defense beyond the "ARTICLE MODE ONLY" docstring hint: previously the LLM could call `polish_text` etc. in blog/book mode and would just produce Nature-register prose; now the tool is absent from the schema so the call cannot be made.
 - Nature-style article-mode upgrade (2026-05-15):
   - `research_manager/llm/prompts.py` — `ARTICLE_WRITING_PROMPT` rewritten to embed an argument-first / hourglass / paper-type-aware workflow distilled from the `nature-skills` instruction bundles (writing + polishing). Includes intake gates (core claim / evidence / boundary), section-specific defaults (abstract/intro/methods/results/discussion/conclusion/title), paragraph rules, and verb calibration ladder. `BLOG_WRITING_PROMPT` and `BOOK_WRITING_PROMPT` are deliberately left unchanged — Nature conventions would distort their register.
   - `research_manager/tools/writing_tools.py` — three new tools, all marked **article-mode only** in their docstrings so the LLM does not invoke them in blog/book mode:

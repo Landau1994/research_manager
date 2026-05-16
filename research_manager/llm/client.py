@@ -59,6 +59,7 @@ class ResearchLLMClient:
 
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.system_prompt = system_prompt or BASE_SYSTEM_PROMPT
+        self.excluded_tools: frozenset[str] = frozenset()
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt}
         ]
@@ -72,8 +73,20 @@ class ResearchLLMClient:
         self.system_prompt = prompt
         self.reset()
 
+    def set_excluded_tools(self, names: frozenset[str] | set[str] | list[str]) -> None:
+        """Hide the given tool names from the schemas sent to the LLM.
+
+        This is a mode-gating mechanism: the article-only helpers are not even
+        visible to the LLM when the user is in `blog` / `book` / `base` mode,
+        so the model cannot call them by mistake.
+        """
+        self.excluded_tools = frozenset(names)
+
     def get_tools(self) -> list[dict]:
-        return ToolRegistry.get_all_schemas()
+        schemas = ToolRegistry.get_all_schemas()
+        if not self.excluded_tools:
+            return schemas
+        return [s for s in schemas if s["function"]["name"] not in self.excluded_tools]
 
     def chat(
         self,

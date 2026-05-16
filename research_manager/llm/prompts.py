@@ -128,3 +128,22 @@ def writing_prompt_for(mode: str) -> str:
     if not extra:
         return BASE_SYSTEM_PROMPT
     return BASE_SYSTEM_PROMPT + "\n\n## Writing Mode: " + mode + "\n\n" + extra
+
+
+ARTICLE_ONLY_TOOLS = frozenset({"polish_text", "add_citations", "data_availability"})
+
+
+def excluded_tools_for(mode: str) -> frozenset[str]:
+    """Tool names that must be hidden from the LLM in the given mode.
+
+    The Nature-style helpers (`polish_text`, `add_citations`, `data_availability`)
+    only fit `article` mode. In `blog` and `book` they would push prose toward
+    Nature register and citation conventions that do not match the audience, so
+    we strip them from the schema list entirely — defense beyond the docstring
+    "ARTICLE MODE ONLY" hint.
+    """
+    if mode == "article":
+        return frozenset()
+    if mode in ("blog", "book", "base"):
+        return ARTICLE_ONLY_TOOLS
+    return frozenset()

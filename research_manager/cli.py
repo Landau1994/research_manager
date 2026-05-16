@@ -21,7 +21,7 @@ from rich.table import Table
 from research_manager import __version__
 from research_manager.context import get_workspace, set_workspace
 from research_manager.llm.client import ResearchLLMClient
-from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, writing_prompt_for
+from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, excluded_tools_for, writing_prompt_for
 from research_manager.sessions import auto_save, list_sessions, load_session, manual_save, pick_auto_slot
 from research_manager.tools import ToolRegistry  # noqa: F401  (triggers tool registration)
 from research_manager.tools import external_access
@@ -614,12 +614,14 @@ def _make_client(mode: str = "base") -> ResearchLLMClient:
         sys.exit(1)
 
     system_prompt = BASE_SYSTEM_PROMPT if mode == "base" else writing_prompt_for(mode)
-    return ResearchLLMClient(
+    client = ResearchLLMClient(
         api_key=api_key,
         base_url=os.getenv("OPENAI_BASE_URL") or None,
         model=os.getenv("RM_MODEL") or None,
         system_prompt=system_prompt,
     )
+    client.set_excluded_tools(excluded_tools_for(mode))
+    return client
 
 
 def _do_chat(client: ResearchLLMClient, user_input: str) -> str:
@@ -754,6 +756,7 @@ def _run_interactive(mode: str) -> None:
                     new_prompt = BASE_SYSTEM_PROMPT if loaded_mode == "base" else writing_prompt_for(loaded_mode)
                     client.system_prompt = new_prompt
                     mode = loaded_mode
+                client.set_excluded_tools(excluded_tools_for(mode))
                 auto_slot = pick_auto_slot(ws)
                 turns = len([m for m in client.messages if m.get("role") == "user"])
                 console.print(
@@ -800,8 +803,14 @@ def _run_interactive(mode: str) -> None:
                     continue
                 new_prompt = BASE_SYSTEM_PROMPT if arg == "base" else writing_prompt_for(arg)
                 client.set_system_prompt(new_prompt)
+                client.set_excluded_tools(excluded_tools_for(arg))
                 mode = arg
-                console.print(f"[dim]switched to mode: {arg}[/dim]")
+                excluded = sorted(client.excluded_tools)
+                msg = f"[dim]switched to mode: {arg}"
+                if excluded:
+                    msg += f" (hidden tools: {', '.join(excluded)})"
+                msg += "[/dim]"
+                console.print(msg)
                 continue
             console.print(f"[yellow]unknown command: {cmd}[/yellow]")
             continue
@@ -833,11 +842,16 @@ def _batch_worker(args: tuple) -> dict:
     # Re-import in worker context
     from research_manager.context import set_workspace as _set_ws
     from research_manager.llm.client import ResearchLLMClient as _Client
-    from research_manager.llm.prompts import BASE_SYSTEM_PROMPT as _BASE, writing_prompt_for as _wp
+    from research_manager.llm.prompts import (
+        BASE_SYSTEM_PROMPT as _BASE,
+        excluded_tools_for as _excl,
+        writing_prompt_for as _wp,
+    )
     from research_manager.tools import ToolRegistry as _Reg  # noqa: F401
     _set_ws(workspace)
     prompt = _BASE if mode == "base" else _wp(mode)
     client = _Client(system_prompt=prompt)
+    client.set_excluded_tools(_excl(mode))
     try:
         response = client.chat(question)
         return {"idx": idx, "ok": True, "response": response, "question": question}

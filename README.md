@@ -201,7 +201,7 @@ See [examples/quickstart.md](examples/quickstart.md) for a walkthrough.
 - [x] Result-aware context injection (list_results, read_text_file tools)
 - [x] Section-by-section drafting (write_report / append_report)
 - [x] Markdown output to `report/{article,blog,book}/`
-- [x] Nature-style upgrade for **article mode only**: argument-first prompt + three helper tools (`polish_text`, `add_citations`, `data_availability`) distilled from the `nature-skills` instruction bundles. Blog and book modes are unchanged because Nature conventions would distort their register.
+- [x] Nature-style upgrade for **article mode only**: argument-first prompt + three helper tools (`polish_text`, `add_citations`, `data_availability`) distilled from the `nature-skills` instruction bundles. Blog and book modes are unchanged because Nature conventions would distort their register. The three helpers are hidden from the LLM's tool schema in blog/book/base mode, so they cannot be called by mistake.
 
 ### Phase 4: Project Management ✅
 - [x] Workspace initialization (`easy-research init`) and validation
