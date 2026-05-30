@@ -32,7 +32,7 @@ Project-level instructions for Claude Code sessions working on this repository.
 
 ## Current State
 
-Phases 1–10 complete. 29 LLM-callable tools registered across `code`, `writing`, `project`, and `dynamic` categories. Article writing mode is tuned to Nature/Nature Communications conventions (argument-first prompt + `polish_text` / `add_citations` / `data_availability` helpers). Blog and book modes are intentionally not Nature-tuned.
+Phases 1–10 complete. 31 LLM-callable tools registered across `code`, `writing`, `project`, and `dynamic` categories. Article writing mode is tuned to Nature/Nature Communications conventions (argument-first prompt + `polish_text` / `add_citations` / `data_availability` helpers). Blog and book modes are intentionally not Nature-tuned. Project memory (`MEMORY.md`) is loaded into the system prompt at REPL startup; the REPL offers to resume the freshest recent auto-save.
 
 Key components:
 - `executor/runner.py` — subprocess runner with `conda run -n <env>`, SIGTERM/SIGKILL, before/after file diff
@@ -42,7 +42,10 @@ Key components:
 - `planner/task_graph.py` — DAG with cycle detection
 - `context.py` — `get_workspace()` / `set_workspace()` resolves to CLI dir, `RM_WORKSPACE` env, or cwd
 - `sessions.py` — auto-save (3 rotating slots), manual save/load, session listing
+- `memory.py` — `MEMORY.md` reader + injector + `freshest_resumable_slot` for auto-resume
+- `cli_prompt.py` — `prompt_toolkit` REPL: `@<path>` and `/command` Tab completion, `FileHistory` persistent history, CJK-safe backspace
 - `llm/prompts.py` — `BASE_SYSTEM_PROMPT` plus `writing_prompt_for("article"|"blog"|"book")`
+- `llm/client.py` — tool-calling loop; `_clean_assistant_for_replay` strips `reasoning_content` and null OpenAI fields before replay (DeepSeek thinking mode requires this)
 
 Possible next steps if extending:
 - Tests (`tests/` directory is empty)

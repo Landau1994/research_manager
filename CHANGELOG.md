@@ -7,6 +7,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Project memory + auto-resume + persistent REPL history (2026-05-30):
+  - `research_manager/memory.py` — new module. `load_memory(workspace)` reads `MEMORY.md` from the workspace root; `inject_into_system_prompt(base, mem)` appends it under a stable `## Project Memory (from MEMORY.md)` header (idempotent — re-injecting replaces the previous block, never stacks). `append_memory(ws, fact, title=None, category=...)` writes to `MEMORY.md` with `## <title> <!-- id · category · added -->` headers; same-title sections deduplicate (subsequent facts append as dated bullets under the existing header rather than spawning a duplicate). `freshest_resumable_slot(ws)` scans the auto-save slots and returns metadata for the most recent slot worth resuming (must have user turns; ≤ 7 days old).
+  - `research_manager/cli.py` — REPL startup now: (1) injects `MEMORY.md` into the system prompt via `_build_system_prompt(mode, workspace)`, (2) prints `memory: MEMORY.md loaded into system prompt` when a file is present, (3) calls `_maybe_offer_resume()` which prompts `resume? (y/N)` for the freshest recent slot (skipped silently when stdin isn't a TTY or `RM_NO_RESUME=1`). The same `_build_system_prompt` is reused on `/mode` and `/load` switches so memory survives mode/session changes. `_batch_worker` also injects memory.
+  - REPL command `/remember <fact>` (and `title :: fact` syntax) writes to `MEMORY.md` and re-injects into the live system prompt so the rest of the current turn already sees the new fact.
+  - REPL command `/memory` shows the current `MEMORY.md` contents in a panel.
+  - LLM-callable tools `remember_fact(fact, title="", category="project")` and `read_memory()` (registered under the `project` category) — bringing the registered-tool count from 29 to 31.
+  - `research_manager/cli_prompt.py` — `make_session(..., history_dir=ws)` now uses `prompt_toolkit.history.FileHistory` at `<ws>/.research_manager_sessions/repl_history` so Up/Down browses prior inputs across REPL restarts. Falls back to `InMemoryHistory` when the path can't be written.
+  - `tests/test_memory.py` — 13 tests covering load/inject/append/dedupe/freshest-slot logic.
+
 - Tab-completion for `@<path>` and `/commands` in the REPL (2026-05-30):
   - `research_manager/cli_prompt.py` — new module wrapping `prompt_toolkit` with an `_AtPathCompleter` that scans the cursor-left text for the closest standalone `@` (whitespace-separated, so `email@host` is *not* matched) and lists the resolved directory's children. Workspace-relative, `~`-expanded, and absolute paths all complete; subdirectory navigation (`@script/<TAB>`, `@script/f<TAB>`) works incrementally; directories are suffixed with `/`. Slash commands (`/help`, `/mode`, `/load`, …) complete on Tab when the line begins with `/`.
   - In-memory command history (Up/Down browse, Ctrl-R reverse search) for the REPL session.

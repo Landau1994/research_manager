@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from research_manager.context import get_workspace
+from research_manager.memory import append_memory, load_memory
 from research_manager.planner.task_graph import Task, TaskGraph
 from research_manager.tools.registry import tool
 from research_manager.workspace.manager import (
@@ -147,3 +148,37 @@ def update_task_status_tool(task_id: str, status: str) -> str:
     state["tasks"] = graph.to_dict()["tasks"]
     save_state(ws, state)
     return json.dumps({"ok": True, "task_id": task_id, "status": status}, ensure_ascii=False)
+
+
+@tool(name="remember_fact", category="project")
+def remember_fact_tool(fact: str, title: str = "", category: str = "project") -> str:
+    """Save a durable fact about this project to MEMORY.md.
+
+    The agent loads MEMORY.md at startup as part of the system prompt, so
+    facts written here persist across REPL sessions and survive restarts.
+    Use this for project conventions, decisions, environment quirks, file
+    locations the user keeps referring to, and "remember that ..." asks.
+
+    Do NOT use this for ephemeral context (the current todo, transient
+    debug state) or anything the user asks you not to save.
+
+    Args:
+        fact: The fact body. One line or short paragraph; Markdown allowed.
+        title: Optional 1-line section header. Auto-derived from `fact` if empty.
+        category: Free-form tag, e.g. "project", "convention", "env", "decision".
+    """
+    ws = get_workspace()
+    result = append_memory(ws, fact=fact, title=title or None, category=category)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@tool(name="read_memory", category="project")
+def read_memory_tool() -> str:
+    """Return the current MEMORY.md contents (or empty string if none).
+
+    The system prompt already includes this content, but the tool is
+    available for the model to re-read it explicitly when needed (for
+    example when deciding whether to overwrite an existing fact).
+    """
+    ws = get_workspace()
+    return json.dumps({"memory": load_memory(ws)}, ensure_ascii=False)

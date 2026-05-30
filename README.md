@@ -168,7 +168,7 @@ easy-research sessions analyze <id>    # Tier 2 derived signals as JSON
 easy-research sessions prune --keep N  # manually trim trajectories
 ```
 
-REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/package <name>`, `/env scan|plan`, `/sessions`, `/save [name]`, `/load <name>`, `/branch [name]`, `/good [note]`, `/bad [note]`, `/outcome <kind>`, `/redo`, `/reset`, `/help`, `/quit`.
+REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/package <name>`, `/env scan|plan`, `/sessions`, `/save [name]`, `/load <name>`, `/branch [name]`, `/remember <fact>`, `/memory`, `/good [note]`, `/bad [note]`, `/outcome <kind>`, `/redo`, `/reset`, `/help`, `/quit`.
 
 ### Reading files outside the workspace
 
@@ -220,6 +220,33 @@ CJK input (the REPL uses `prompt_toolkit` for line editing rather than the
 default cooked-mode `input()`).
 
 See [examples/quickstart.md](examples/quickstart.md) for a walkthrough.
+
+### Project memory and resuming sessions
+
+The agent has two layers of cross-session memory:
+
+1. **`MEMORY.md`** — a Markdown file in the workspace root, loaded into
+   the system prompt every time the REPL starts. Use it for durable
+   project facts: conda env names, code conventions, file naming rules,
+   "always run X before Y" decisions, anything you'd otherwise re-explain
+   on every restart. Edit by hand, or use:
+   - `/remember <fact>` — appends a fact under an auto-derived title.
+   - `/remember Title :: fact body` — explicit title.
+   - `/memory` — show current contents.
+   - The agent itself can call the `remember_fact` tool when you say
+     things like "remember that we use the `raretools` env for R".
+   Sections with the same title deduplicate — subsequent facts under the
+   same heading append as dated bullets rather than spawning a new section.
+
+2. **Auto-resume** — at REPL startup, if the freshest auto-save slot has
+   user turns and is at most 7 days old, the REPL prompts `resume? (y/N)`
+   with a one-line preview of the last user message. Skipped silently
+   when stdin isn't a TTY (batch / piped) or `RM_NO_RESUME=1`. You can
+   still resume any older slot manually with `/load auto-{0,1,2}`.
+
+REPL command history is also persisted to
+`<workspace>/.research_manager_sessions/repl_history` so Up/Down works
+across REPL restarts.
 
 ## Roadmap
 

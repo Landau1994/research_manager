@@ -24,6 +24,13 @@ from research_manager.cli_prompt import make_session, read_input
 from research_manager.context import get_workspace, set_workspace
 from research_manager.llm.client import ResearchLLMClient, sanitize_history
 from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, excluded_tools_for, writing_prompt_for
+from research_manager.memory import (
+    append_memory,
+    freshest_resumable_slot,
+    humanize_age,
+    inject_into_system_prompt,
+    load_memory,
+)
 from research_manager.recording import TrajectoryRecorder
 from research_manager.sessions import auto_save, list_sessions, load_session, manual_save, pick_auto_slot
 from research_manager.tools import ToolRegistry  # noqa: F401  (triggers tool registration)
@@ -80,6 +87,9 @@ def _print_help() -> None:
         "  /save [name]    - save current conversation (permanent)\n"
         "  /load <name>    - load a session (e.g. 'auto-0' or a saved name)\n"
         "  /branch [name]  - fork: save the current path under a new name\n"
+        "  /remember <fact>- save a durable fact to MEMORY.md (loaded next session)\n"
+        "                    optional `title :: fact` syntax for explicit headers\n"
+        "  /memory         - show the current MEMORY.md\n"
         "  /good [note]    - mark the last response as good (recording mode)\n"
         "  /bad [note]     - mark the last response as bad (recording mode)\n"
         "  /outcome <kind> - tag session as success|partial|fail (recording)\n"
@@ -634,14 +644,21 @@ def _maybe_make_recorder(
     return rec
 
 
-def _make_client(mode: str = "base") -> ResearchLLMClient:
+def _build_system_prompt(mode: str, workspace: Path) -> str:
+    """Compose the system prompt: base/mode prompt + MEMORY.md (if any)."""
+    base = BASE_SYSTEM_PROMPT if mode == "base" else writing_prompt_for(mode)
+    return inject_into_system_prompt(base, load_memory(workspace))
+
+
+def _make_client(mode: str = "base", workspace: Path | None = None) -> ResearchLLMClient:
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
         console.print("[bold red]error:[/bold red] OPENAI_API_KEY is not set.")
         console.print("Create a .env file or export the variable. See .env.example.")
         sys.exit(1)
 
-    system_prompt = BASE_SYSTEM_PROMPT if mode == "base" else writing_prompt_for(mode)
+    ws = workspace or get_workspace()
+    system_prompt = _build_system_prompt(mode, ws)
     client = ResearchLLMClient(
         api_key=api_key,
         base_url=os.getenv("OPENAI_BASE_URL") or None,
@@ -718,10 +735,55 @@ def _print_sessions(ws: Path) -> None:
     console.print(table)
 
 
+def _maybe_offer_resume(client: ResearchLLMClient, ws: Path, mode: str) -> tuple[Path | None, str]:
+    """Prompt the user whether to resume the freshest auto-save.
+
+    Returns ``(slot_path_or_None_if_skipped, mode_after)``. The mode may
+    change if the resumed session was in a different writing mode.
+    Skipped silently when stdin isn't a TTY (batch / piped input).
+    """
+    if not sys.stdin.isatty():
+        return None, mode
+    if os.environ.get("RM_NO_RESUME", "").lower() in ("1", "true", "yes", "on"):
+        return None, mode
+    cand = freshest_resumable_slot(ws)
+    if cand is None:
+        return None, mode
+
+    age = humanize_age(cand["age_s"])
+    preview = cand["last_user"] or "(no preview)"
+    console.print(
+        f"[yellow]found a recent session:[/yellow] [bold]{cand['name']}[/bold] "
+        f"[dim]({cand['turns']} turns, {age}, mode={cand['mode']})[/dim]"
+    )
+    console.print(f"[dim]  last user turn: {preview}[/dim]")
+    try:
+        choice = console.input(
+            "[bold yellow]resume? (y/N): [/bold yellow]"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]starting fresh[/dim]")
+        return None, mode
+    if choice not in ("y", "yes"):
+        console.print("[dim]starting fresh[/dim]")
+        return None, mode
+
+    new_mode = cand["mode"]
+    if new_mode != mode:
+        client.set_system_prompt(_build_system_prompt(new_mode, ws))
+        client.set_excluded_tools(excluded_tools_for(new_mode))
+
+    client.messages = sanitize_history(cand["messages"])
+    console.print(
+        f"[green]resumed {cand['name']}[/green] [dim]({cand['turns']} turns)[/dim]"
+    )
+    return cand["path"], new_mode
+
+
 def _run_interactive(mode: str, record: bool = False) -> None:
     _print_banner()
-    client = _make_client(mode=mode)
     ws = set_workspace(Path.cwd())
+    client = _make_client(mode=mode, workspace=ws)
 
     auto_slot = pick_auto_slot(ws)
     recorder = _maybe_make_recorder(record, ws, client.model, mode)
@@ -730,13 +792,15 @@ def _run_interactive(mode: str, record: bool = False) -> None:
 
     # Single PromptSession for the whole REPL — keeps history across turns
     # and gives us proper CJK-aware line editing + `@<path>` Tab completion.
-    prompt_session = make_session(console, get_workspace)
+    prompt_session = make_session(console, get_workspace, history_dir=ws)
 
     console.print(f"[dim]model: {client.model}[/dim]")
     if client.base_url:
         console.print(f"[dim]base_url: {client.base_url}[/dim]")
     console.print(f"[dim]workspace: {ws}[/dim]")
     console.print(f"[dim]mode: {mode}[/dim]")
+    if load_memory(ws):
+        console.print(f"[dim]memory: MEMORY.md loaded into system prompt[/dim]")
     console.print(f"[dim]session auto-save: slot {auto_slot}[/dim]")
     if recorder is not None:
         console.print(f"[dim]recording: trajectories/{recorder.session_id}[/dim]")
@@ -745,6 +809,9 @@ def _run_interactive(mode: str, record: bool = False) -> None:
         console.print(f"[dim]external read paths: {', '.join(seeded)}[/dim]")
     console.print("[dim]Type a message, or /help for commands. "
                   "Tab completes `@<path>` and /commands.[/dim]\n")
+
+    # Offer to resume the freshest recent session (only when stdin is a TTY).
+    _, mode = _maybe_offer_resume(client, ws, mode)
 
     while True:
         try:
@@ -793,6 +860,39 @@ def _run_interactive(mode: str, record: bool = False) -> None:
                     continue
                 sp = manual_save(ws, arg, client.messages, model=client.model, mode=mode)
                 console.print(f"[green]saved → {sp.relative_to(ws)}[/green]")
+                continue
+            if cmd == "/remember":
+                if not arg:
+                    console.print("[yellow]usage: /remember <fact>[/yellow] "
+                                  "[dim](saved to MEMORY.md, loaded next session)[/dim]")
+                    continue
+                # Optional ``title :: fact`` syntax for explicit headers.
+                if "::" in arg:
+                    title, _, body = arg.partition("::")
+                    title, body = title.strip(), body.strip()
+                else:
+                    title, body = "", arg
+                res = append_memory(ws, fact=body, title=title or None, category="user")
+                if res.get("ok"):
+                    console.print(
+                        f"[green]{res['action']}[/green] [dim]MEMORY.md → "
+                        f"§{res['title']}[/dim]"
+                    )
+                    # Re-inject so the *current* session also sees the new fact.
+                    client.system_prompt = _build_system_prompt(mode, ws)
+                    if client.messages and client.messages[0].get("role") == "system":
+                        client.messages[0]["content"] = client.system_prompt
+                else:
+                    console.print(f"[red]{res.get('error', 'failed')}[/red]")
+                continue
+            if cmd == "/memory":
+                mem = load_memory(ws)
+                if not mem:
+                    console.print("[dim]MEMORY.md is empty or missing[/dim]")
+                else:
+                    console.print(Panel(
+                        Markdown(mem), title="MEMORY.md", border_style="cyan"
+                    ))
                 continue
             if cmd in ("/good", "/bad"):
                 if recorder is None:
@@ -857,8 +957,7 @@ def _run_interactive(mode: str, record: bool = False) -> None:
                 client.messages = sanitize_history(data.get("messages", []))
                 loaded_mode = data.get("mode", mode)
                 if loaded_mode != mode:
-                    new_prompt = BASE_SYSTEM_PROMPT if loaded_mode == "base" else writing_prompt_for(loaded_mode)
-                    client.system_prompt = new_prompt
+                    client.system_prompt = _build_system_prompt(loaded_mode, ws)
                     mode = loaded_mode
                 client.set_excluded_tools(excluded_tools_for(mode))
                 auto_slot = pick_auto_slot(ws)
@@ -905,8 +1004,7 @@ def _run_interactive(mode: str, record: bool = False) -> None:
                 if arg not in ("base", "article", "blog", "book"):
                     console.print("[yellow]usage: /mode <base|article|blog|book>[/yellow]")
                     continue
-                new_prompt = BASE_SYSTEM_PROMPT if arg == "base" else writing_prompt_for(arg)
-                client.set_system_prompt(new_prompt)
+                client.set_system_prompt(_build_system_prompt(arg, ws))
                 client.set_excluded_tools(excluded_tools_for(arg))
                 mode = arg
                 excluded = sorted(client.excluded_tools)
@@ -930,7 +1028,7 @@ def _run_interactive(mode: str, record: bool = False) -> None:
 
 def _run_oneshot(question: str, mode: str, output: str = "", record: bool = False) -> None:
     ws = set_workspace(Path.cwd())
-    client = _make_client(mode=mode)
+    client = _make_client(mode=mode, workspace=ws)
     recorder = _maybe_make_recorder(record, ws, client.model, mode)
     if recorder is not None:
         client.set_recorder(recorder)
@@ -961,9 +1059,12 @@ def _batch_worker(args: tuple) -> dict:
         excluded_tools_for as _excl,
         writing_prompt_for as _wp,
     )
+    from research_manager.memory import inject_into_system_prompt as _inject
+    from research_manager.memory import load_memory as _load_mem
     from research_manager.tools import ToolRegistry as _Reg  # noqa: F401
     _set_ws(workspace)
     prompt = _BASE if mode == "base" else _wp(mode)
+    prompt = _inject(prompt, _load_mem(Path(workspace)))
     client = _Client(system_prompt=prompt)
     client.set_excluded_tools(_excl(mode))
     try:

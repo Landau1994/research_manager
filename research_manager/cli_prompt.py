@@ -29,7 +29,7 @@ try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.formatted_text import ANSI
-    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.history import FileHistory, InMemoryHistory
     _HAS_PT = True
 except ImportError:  # pragma: no cover
     _HAS_PT = False
@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover
 SLASH_COMMANDS = [
     "/help", "/tools", "/mode", "/workspace", "/allow", "/allowed", "/deny",
     "/package", "/env", "/sessions", "/save", "/load", "/branch",
+    "/remember", "/memory",
     "/good", "/bad", "/outcome", "/redo", "/reset", "/clear", "/quit",
     "/exit",
 ]
@@ -168,24 +169,38 @@ def _ansi_prompt(rich_console, markup: str) -> "ANSI | str":
     return ANSI(cap.get())
 
 
-def make_session(rich_console, workspace_getter):
+def make_session(rich_console, workspace_getter, history_dir: Path | None = None):
     """Create a PromptSession with our completer, or None if unavailable.
 
     The session is reused for the lifetime of the REPL so command history
-    persists across turns. History is in-memory only (we don't want to leak
-    research prompts across sessions silently); persistent history can be
-    added later as opt-in.
+    persists across turns. If ``history_dir`` is provided, history is also
+    persisted to ``<history_dir>/.research_manager_sessions/repl_history``
+    so Up/Down works across REPL restarts. Pass ``None`` to keep history
+    in-memory only (used by tests).
     """
     if not _HAS_PT:
         return None
     completer = _AtPathCompleter(workspace_getter=workspace_getter)
+    history = _make_history(history_dir)
     return PromptSession(
         completer=completer,
         complete_while_typing=False,  # only on Tab — keeps typing snappy
-        history=InMemoryHistory(),
+        history=history,
         enable_history_search=True,   # Ctrl-R reverse search
         mouse_support=False,
     )
+
+
+def _make_history(history_dir: Path | None):
+    """Build a history backend. Falls back to in-memory if disk is unwritable."""
+    if not _HAS_PT or history_dir is None:
+        return InMemoryHistory()
+    try:
+        target_dir = Path(history_dir) / ".research_manager_sessions"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return FileHistory(str(target_dir / "repl_history"))
+    except OSError:
+        return InMemoryHistory()
 
 
 def read_input(session, rich_console, prompt_markup: str) -> str:
