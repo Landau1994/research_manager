@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- `@<path>` references in REPL and one-shot input (2026-05-30):
+  - `research_manager/cli_atrefs.py` — `expand_at_refs(text, workspace)` parses `@<path>` tokens and returns an augmented user message plus per-attachment status notes for the REPL to print.
+  - Hybrid resolution policy: text files ≤ 50 KB inlined verbatim (zero tool round-trip); larger files / non-text extensions become a one-line `read_text_file` / `read_external_file` hint; directories show a shallow listing capped at 30 entries with a `list_workspace` hint.
+  - External paths integrate with the Phase 7 `external_access` whitelist — unapproved paths emit a refusal note and `/allow` hint, never inline contents.
+  - Strict resolution: `@token` only expands when the path actually exists or is a whitelisted external file; `name@host.com` emails and other `@`-containing strings are left as plain text.
+  - Wired into `_do_chat` (covers REPL, `/redo`) and `_run_oneshot`. Batch worker is unchanged for now (would need cross-process state for the whitelist).
+  - README updated with a new "Attaching files with `@`" section.
 - Phase 11 — Trajectory recorder for future RL/MCTS data (2026-05-30):
   - `research_manager/recording/recorder.py` — `TrajectoryRecorder` class. Opt-in via `--record` or `RM_RECORD=1`. Writes `events.jsonl` (8 event types: `user_message`, `llm_request`, `llm_response`, `tool_call_start`, `tool_call_end`, `subprocess_exit`, `user_label`, `counterfactual`), per-tool-call `snapshots/step_NNNN.json` manifests, and a content-addressed `objects/` blob store shared across sessions. Rolling retention (default 50 trajectories, configurable via `RM_RECORD_KEEP`).
   - `research_manager/recording/analysis.py` — Tier 2 offline analysis: user-edits-after-agent diff, file survival rate, rerun pattern detection, tool-output citation graph, lightweight bilingual reject/accept intent classifier on user messages.

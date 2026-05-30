@@ -19,6 +19,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from research_manager import __version__
+from research_manager.cli_atrefs import expand_at_refs
 from research_manager.context import get_workspace, set_workspace
 from research_manager.llm.client import ResearchLLMClient
 from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, excluded_tools_for, writing_prompt_for
@@ -60,7 +61,10 @@ def _print_tools() -> None:
 
 def _print_help() -> None:
     console.print(
-        "[dim]Commands:\n"
+        "[dim]Input: include `@<path>` to attach a file or directory to your message.\n"
+        "       Small text files are inlined; large/non-text files become a hint;\n"
+        "       directories show a shallow listing. External paths must be /allow'd.\n\n"
+        "Commands:\n"
         "  /tools          - list registered tools\n"
         "  /mode <kind>    - switch writing mode (base, article, blog, book)\n"
         "  /workspace      - show current workspace path\n"
@@ -646,7 +650,10 @@ def _make_client(mode: str = "base") -> ResearchLLMClient:
 
 
 def _do_chat(client: ResearchLLMClient, user_input: str) -> str:
-    response = client.chat(user_input, on_tool_call=_on_tool_call)
+    expanded, notes = expand_at_refs(user_input, get_workspace())
+    for n in notes:
+        console.print(f"[dim]{n}[/dim]")
+    response = client.chat(expanded, on_tool_call=_on_tool_call)
     console.print()
     console.print(Markdown(response))
     return response
@@ -919,8 +926,11 @@ def _run_oneshot(question: str, mode: str, output: str = "", record: bool = Fals
     recorder = _maybe_make_recorder(record, ws, client.model, mode)
     if recorder is not None:
         client.set_recorder(recorder)
+    expanded, notes = expand_at_refs(question, ws)
+    for n in notes:
+        console.print(f"[dim]{n}[/dim]")
     try:
-        response = client.chat(question, on_tool_call=_on_tool_call)
+        response = client.chat(expanded, on_tool_call=_on_tool_call)
     finally:
         if recorder is not None:
             recorder.close(outcome=None)

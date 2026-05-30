@@ -188,6 +188,28 @@ you > read the schema in ~/data/refs/manifest.json
 The agent uses the `read_external_file` tool for these reads. Approval is per
 directory subtree — approving `/tmp/ext_data` does not approve `/tmp/secret.txt`.
 
+### Attaching files with `@`
+
+Inside any user message you can include `@<path>` tokens to attach files or
+directories to the prompt:
+
+```
+you > review @script/clean.py and compare with @docs/style.md
+you > what's in @res/?
+you > @~/refs/dataset.csv  ← needs /allow first
+```
+
+Behavior:
+- Small text files (≤ 50 KB) are inlined verbatim — no extra tool round-trip.
+- Large files or non-text extensions become a one-line hint pointing the LLM at
+  `read_text_file` / `read_external_file`.
+- Directories show a shallow listing (≤ 30 entries) plus a hint to call
+  `list_workspace`.
+- Paths outside the workspace must be in the external whitelist; otherwise the
+  attachment is refused with a `/allow` hint and contents are not shown.
+- `name@host.com` style emails are not misinterpreted (the path must resolve to
+  an existing file or directory).
+
 See [examples/quickstart.md](examples/quickstart.md) for a walkthrough.
 
 ## Roadmap
