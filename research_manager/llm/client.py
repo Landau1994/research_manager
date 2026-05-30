@@ -37,6 +37,62 @@ def _format_tool_result_md(func_name: str, result: str) -> str | None:
     return f"> 🔧 `{func_name}`:\n> ```\n> " + text.replace("\n", "\n> ") + "\n> ```"
 
 
+# Fields that ``ChatCompletionMessage.model_dump()`` emits but that are unsafe
+# (or just noisy) to replay back to the API:
+#
+# - ``reasoning_content``: DeepSeek-only "thinking" output. DeepSeek's docs are
+#   explicit that this must NOT be sent back in subsequent multi-turn
+#   requests, otherwise the API returns a 400. The error message it returns
+#   is misleading ("tool_calls must be followed by tool messages") because
+#   the validator gets confused when ``reasoning_content`` co-exists with
+#   ``tool_calls`` on a replayed assistant message.
+# - ``function_call``, ``audio``, ``annotations``, ``refusal``: standard
+#   OpenAI fields that come back as ``None`` for typical tool-calling
+#   replies. Some OpenAI-compatible providers strict-validate these and
+#   reject ``function_call: null`` alongside non-null ``tool_calls``.
+#
+# We strip them before appending to ``self.messages`` so the persisted /
+# replayed conversation contains only the OpenAI-standard subset.
+_REPLAY_DROP_KEYS = (
+    "reasoning_content",
+    "function_call",
+    "audio",
+    "annotations",
+    "refusal",
+)
+
+
+def _clean_assistant_for_replay(message_dict: dict) -> dict:
+    """Return a copy of an assistant message safe to send back to the API."""
+    out = {
+        k: v for k, v in message_dict.items()
+        if k not in _REPLAY_DROP_KEYS and v is not None
+    }
+    # Drop empty tool_calls so the API doesn't see a no-op tool block.
+    tcs = out.get("tool_calls")
+    if isinstance(tcs, list) and not tcs:
+        out.pop("tool_calls", None)
+    # Make sure role survives even if it's somehow missing.
+    out.setdefault("role", "assistant")
+    # An assistant message must have at least content or tool_calls.
+    if "tool_calls" not in out and out.get("content") in (None, ""):
+        out["content"] = ""
+    return out
+
+
+def sanitize_history(messages: list[dict]) -> list[dict]:
+    """Clean a saved conversation in-place so it can be safely replayed.
+
+    Strips the same fields as :func:`_clean_assistant_for_replay` from every
+    assistant message. ``user``/``system``/``tool`` messages are passed
+    through unchanged. Returns the input list (mutated) for chainability.
+    """
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and m.get("role") == "assistant":
+            messages[i] = _clean_assistant_for_replay(m)
+    return messages
+
+
 class ResearchLLMClient:
     """LLM client with tool-calling for research project management."""
 
@@ -203,7 +259,11 @@ class ResearchLLMClient:
             choice = response.choices[0]
             message = choice.message
             message_dict = message.model_dump()
-            self.messages.append(message_dict)
+            # Replay-safe copy goes into ``self.messages`` so the next API
+            # request never sees ``reasoning_content`` etc. The full dump
+            # still flows to the recorder + counterfactual sampler below
+            # so we don't lose any signal for offline analysis.
+            self.messages.append(_clean_assistant_for_replay(message_dict))
 
             if self.recorder is not None and req_id is not None:
                 try:

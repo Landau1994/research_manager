@@ -22,7 +22,7 @@ from research_manager import __version__
 from research_manager.cli_atrefs import expand_at_refs
 from research_manager.cli_prompt import make_session, read_input
 from research_manager.context import get_workspace, set_workspace
-from research_manager.llm.client import ResearchLLMClient
+from research_manager.llm.client import ResearchLLMClient, sanitize_history
 from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, excluded_tools_for, writing_prompt_for
 from research_manager.recording import TrajectoryRecorder
 from research_manager.sessions import auto_save, list_sessions, load_session, manual_save, pick_auto_slot
@@ -854,7 +854,7 @@ def _run_interactive(mode: str, record: bool = False) -> None:
                 if data is None:
                     console.print(f"[red]session not found: {arg}[/red]")
                     continue
-                client.messages = data.get("messages", [])
+                client.messages = sanitize_history(data.get("messages", []))
                 loaded_mode = data.get("mode", mode)
                 if loaded_mode != mode:
                     new_prompt = BASE_SYSTEM_PROMPT if loaded_mode == "base" else writing_prompt_for(loaded_mode)

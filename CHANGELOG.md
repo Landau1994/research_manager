@@ -14,6 +14,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   - `pyproject.toml` — added `prompt_toolkit>=3.0` to runtime dependencies.
 
 ### Fixed
+- DeepSeek 400 error on multi-turn replay with `reasoning_content` (2026-05-30):
+  - Symptom: `An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'`. Misleading — the structural pairing was correct.
+  - Root cause: `message.model_dump()` included DeepSeek's `reasoning_content` (thinking output) on every assistant message and we appended that verbatim to `self.messages`. DeepSeek explicitly forbids echoing `reasoning_content` back in subsequent requests; when it co-exists with `tool_calls` the API's validator misreports the failure as the tool-pairing error above.
+  - Fix: `research_manager/llm/client.py` — new `_clean_assistant_for_replay()` strips `reasoning_content`, plus null-valued `function_call` / `audio` / `annotations` / `refusal` (also reject-prone on strict OpenAI-compatible providers), before appending to `self.messages`. Recorder + counterfactual sampler still see the full `model_dump()` so offline analysis is unaffected.
+  - Public helper: `sanitize_history(messages)` cleans an existing conversation list. Wired into `/load` so saved/auto sessions written before this fix become safe to resume on the next chat turn.
+  - Tests: `tests/test_llm_replay_sanitize.py` covers the strip rules.
+
 - REPL backspace deleting only part of a CJK character (2026-05-30):
   - Root cause: the previous `console.input()` used Python's built-in cooked-mode `input()`, which on many terminals erases by *byte* rather than by character — so backspacing over a 3-byte UTF-8 character left a half-character residue (or chopped the byte sequence and corrupted the line).
   - Fix: `_run_interactive` now reads input through a `prompt_toolkit.PromptSession`, which owns line editing in raw mode and tracks character widths itself. Falls back to `console.input` if `prompt_toolkit` is unavailable or stdin is not a TTY (e.g. piped input in tests).
