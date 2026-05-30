@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Callable
 
 from openai import OpenAI
@@ -60,6 +61,7 @@ class ResearchLLMClient:
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.system_prompt = system_prompt or BASE_SYSTEM_PROMPT
         self.excluded_tools: frozenset[str] = frozenset()
+        self.recorder: Any = None
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt}
         ]
@@ -72,6 +74,53 @@ class ResearchLLMClient:
         """Replace the system prompt and reset history."""
         self.system_prompt = prompt
         self.reset()
+
+    def set_recorder(self, recorder: Any) -> None:
+        """Attach (or detach with None) a TrajectoryRecorder. See research_manager.recording."""
+        self.recorder = recorder
+        try:
+            from research_manager.recording import set_active_recorder
+            set_active_recorder(recorder)
+        except Exception:
+            pass
+
+    def _maybe_record_counterfactual(
+        self,
+        request_id: str,
+        chosen_message: dict,
+        request_kwargs: dict,
+    ) -> None:
+        """Tier 4: shadow-sample one alternate completion and record it (no execution)."""
+        if os.environ.get("RM_RECORD_COUNTERFACTUALS", "").lower() not in ("1", "true", "yes", "on"):
+            return
+        if self.recorder is None:
+            return
+        try:
+            cf_temp = float(os.environ.get("RM_COUNTERFACTUAL_TEMP", "0.7"))
+        except ValueError:
+            cf_temp = 0.7
+        cf_kwargs = dict(request_kwargs)
+        cf_kwargs["temperature"] = cf_temp
+        cf_kwargs["n"] = 1
+        try:
+            from research_manager.recording.recorder import _canonical_bytes, _sha256_bytes
+            chosen_hash = _sha256_bytes(_canonical_bytes(chosen_message))
+        except Exception:
+            chosen_hash = ""
+        try:
+            cf_response = self.client.chat.completions.create(**cf_kwargs)
+            cf_msg = cf_response.choices[0].message.model_dump()
+        except Exception:
+            return
+        try:
+            self.recorder.on_counterfactual(
+                request_id=request_id,
+                chosen_message_hash=chosen_hash,
+                rejected_message=cf_msg,
+                temperature=cf_temp,
+            )
+        except Exception:
+            pass
 
     def set_excluded_tools(self, names: frozenset[str] | set[str] | list[str]) -> None:
         """Hide the given tool names from the schemas sent to the LLM.
@@ -105,6 +154,11 @@ class ResearchLLMClient:
             The final Markdown response (LLM text + formatted tool results).
         """
         self.messages.append({"role": "user", "content": user_message})
+        if self.recorder is not None:
+            try:
+                self.recorder.on_user_message(user_message)
+            except Exception:
+                pass
 
         collected_parts: list[str] = []
         iteration = 0
@@ -129,11 +183,44 @@ class ResearchLLMClient:
                 request_kwargs["tools"] = tools
                 request_kwargs["tool_choice"] = "auto"
 
+            req_id = None
+            if self.recorder is not None:
+                try:
+                    req_id = self.recorder.on_llm_request(
+                        messages=self.messages,
+                        model=self.model,
+                        temperature=self.temperature,
+                        tools_count=len(tools) if tools else 0,
+                        extra=extra_kwargs,
+                    )
+                except Exception:
+                    req_id = None
+
+            t0 = time.monotonic()
             response = self.client.chat.completions.create(**request_kwargs)
+            latency_ms = (time.monotonic() - t0) * 1000.0
 
             choice = response.choices[0]
             message = choice.message
-            self.messages.append(message.model_dump())
+            message_dict = message.model_dump()
+            self.messages.append(message_dict)
+
+            if self.recorder is not None and req_id is not None:
+                try:
+                    usage = getattr(response, "usage", None)
+                    usage_dict = usage.model_dump() if usage is not None else None
+                    self.recorder.on_llm_response(
+                        request_id=req_id,
+                        message=message_dict,
+                        finish_reason=choice.finish_reason,
+                        usage=usage_dict,
+                        latency_ms=latency_ms,
+                    )
+                except Exception:
+                    pass
+
+            if self.recorder is not None and req_id is not None:
+                self._maybe_record_counterfactual(req_id, message_dict, request_kwargs)
 
             if message.content:
                 collected_parts.append(message.content)
@@ -157,7 +244,33 @@ class ResearchLLMClient:
                 except json.JSONDecodeError:
                     arguments = {}
 
+                step_idx = None
+                if self.recorder is not None:
+                    try:
+                        step_idx = self.recorder.on_tool_call_start(
+                            call_id=tool_call.id,
+                            name=func_name,
+                            args=arguments,
+                        )
+                    except Exception:
+                        step_idx = None
+
+                t_tool = time.monotonic()
                 result = ToolRegistry.call_tool(func_name, arguments)
+                tool_duration_ms = (time.monotonic() - t_tool) * 1000.0
+
+                if self.recorder is not None and step_idx is not None:
+                    try:
+                        self.recorder.on_tool_call_end(
+                            call_id=tool_call.id,
+                            name=func_name,
+                            result=result,
+                            duration_ms=tool_duration_ms,
+                            step_idx=step_idx,
+                            error=None,
+                        )
+                    except Exception:
+                        pass
 
                 if on_tool_call:
                     on_tool_call(func_name, arguments, result)

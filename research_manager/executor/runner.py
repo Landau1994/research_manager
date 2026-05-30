@@ -201,6 +201,20 @@ class ScriptRunner:
         duration = time.monotonic() - start
         after = _snapshot_dir(self.workspace, self.watch_dirs)
         new_files, modified_files = _diff_snapshots(before, after)
+        try:
+            from research_manager.recording import get_active_recorder
+            if get_active_recorder() is not None:
+                from research_manager.recording.recorder import emit_subprocess_exit
+                emit_subprocess_exit(
+                    command=cmd,
+                    returncode=returncode,
+                    timed_out=timed_out,
+                    duration_ms=duration * 1000.0,
+                    stdout=stdout or "",
+                    stderr=stderr or "",
+                )
+        except Exception:
+            pass
         return ExecutionResult(
             returncode=returncode,
             stdout=stdout or "",

@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Phase 11 — Trajectory recorder for future RL/MCTS data (2026-05-30):
+  - `research_manager/recording/recorder.py` — `TrajectoryRecorder` class. Opt-in via `--record` or `RM_RECORD=1`. Writes `events.jsonl` (8 event types: `user_message`, `llm_request`, `llm_response`, `tool_call_start`, `tool_call_end`, `subprocess_exit`, `user_label`, `counterfactual`), per-tool-call `snapshots/step_NNNN.json` manifests, and a content-addressed `objects/` blob store shared across sessions. Rolling retention (default 50 trajectories, configurable via `RM_RECORD_KEEP`).
+  - `research_manager/recording/analysis.py` — Tier 2 offline analysis: user-edits-after-agent diff, file survival rate, rerun pattern detection, tool-output citation graph, lightweight bilingual reject/accept intent classifier on user messages.
+  - `research_manager/llm/client.py` — six event hooks in `chat()` plus `set_recorder()` and `_maybe_record_counterfactual()`; all hooks try/except wrapped so recording failures never break the conversation. Tier 4 counterfactual sampling shadow-samples one alternate completion at `RM_COUNTERFACTUAL_TEMP` (default 0.7) when `RM_RECORD_COUNTERFACTUALS=1`.
+  - `research_manager/executor/runner.py` — emits `subprocess_exit` events (returncode, timed_out, duration, stdout/stderr hashes) via the module-level `set_active_recorder` hook. Runner stays decoupled — only imports `recording` lazily, no signature changes.
+  - `research_manager/cli.py` — `--record` flag, `easy-research sessions list|trace|analyze|prune` subcommands, REPL slash commands `/good`, `/bad`, `/outcome`, `/redo`, `/branch`. Recorder is started in `_run_interactive` and `_run_oneshot` and closed on exit.
+  - README updated: Phase 11 section, env-var table additions (`RM_RECORD`, `RM_RECORD_KEEP`, `RM_RECORD_COUNTERFACTUALS`, `RM_COUNTERFACTUAL_TEMP`), CLI commands, and REPL command list.
 - Schema-level mode gating for article-only tools (2026-05-16):
   - `research_manager/llm/prompts.py` — `ARTICLE_ONLY_TOOLS = {polish_text, add_citations, data_availability}` and `excluded_tools_for(mode)` helper. Returns the gated set for `blog` / `book` / `base`, empty for `article`.
   - `research_manager/llm/client.py` — `ResearchLLMClient.excluded_tools` field and `set_excluded_tools()` method; `get_tools()` filters the registry schemas before sending to the LLM, so gated tools are not even visible to the model in non-article modes.

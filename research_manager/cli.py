@@ -22,6 +22,7 @@ from research_manager import __version__
 from research_manager.context import get_workspace, set_workspace
 from research_manager.llm.client import ResearchLLMClient
 from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, excluded_tools_for, writing_prompt_for
+from research_manager.recording import TrajectoryRecorder
 from research_manager.sessions import auto_save, list_sessions, load_session, manual_save, pick_auto_slot
 from research_manager.tools import ToolRegistry  # noqa: F401  (triggers tool registration)
 from research_manager.tools import external_access
@@ -71,6 +72,11 @@ def _print_help() -> None:
         "  /sessions       - list saved and auto-saved sessions\n"
         "  /save [name]    - save current conversation (permanent)\n"
         "  /load <name>    - load a session (e.g. 'auto-0' or a saved name)\n"
+        "  /branch [name]  - fork: save the current path under a new name\n"
+        "  /good [note]    - mark the last response as good (recording mode)\n"
+        "  /bad [note]     - mark the last response as bad (recording mode)\n"
+        "  /outcome <kind> - tag session as success|partial|fail (recording)\n"
+        "  /redo           - regenerate last response; reject saved as label\n"
         "  /reset          - clear conversation\n"
         "  /help           - show this help\n"
         "  /quit           - exit[/dim]"
@@ -606,6 +612,21 @@ def _interactive_env_plan(ws: Path) -> None:
     _prompt_and_apply_plan(parsed, target_env)
 
 
+def _maybe_make_recorder(
+    cli_record: bool,
+    ws: Path,
+    model: str,
+    mode: str,
+) -> TrajectoryRecorder | None:
+    """Create a recorder if --record or RM_RECORD=1; otherwise None."""
+    if not cli_record and os.environ.get("RM_RECORD", "").lower() not in ("1", "true", "yes", "on"):
+        return None
+    keep = int(os.environ.get("RM_RECORD_KEEP", "50"))
+    rec = TrajectoryRecorder(workspace=ws, model=model, mode=mode, retention_keep=keep)
+    rec.start()
+    return rec
+
+
 def _make_client(mode: str = "base") -> ResearchLLMClient:
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
@@ -633,6 +654,13 @@ def _do_chat(client: ResearchLLMClient, user_input: str) -> str:
 
 def _has_user_turns(messages: list[dict]) -> bool:
     return any(m.get("role") == "user" for m in messages)
+
+
+def _find_last_user_idx(messages: list[dict]) -> int | None:
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            return i
+    return None
 
 
 def _ask_save_on_exit(client: ResearchLLMClient, ws: Path, mode: str) -> None:
@@ -680,12 +708,15 @@ def _print_sessions(ws: Path) -> None:
     console.print(table)
 
 
-def _run_interactive(mode: str) -> None:
+def _run_interactive(mode: str, record: bool = False) -> None:
     _print_banner()
     client = _make_client(mode=mode)
     ws = set_workspace(Path.cwd())
 
     auto_slot = pick_auto_slot(ws)
+    recorder = _maybe_make_recorder(record, ws, client.model, mode)
+    if recorder is not None:
+        client.set_recorder(recorder)
 
     console.print(f"[dim]model: {client.model}[/dim]")
     if client.base_url:
@@ -693,6 +724,8 @@ def _run_interactive(mode: str) -> None:
     console.print(f"[dim]workspace: {ws}[/dim]")
     console.print(f"[dim]mode: {mode}[/dim]")
     console.print(f"[dim]session auto-save: slot {auto_slot}[/dim]")
+    if recorder is not None:
+        console.print(f"[dim]recording: trajectories/{recorder.session_id}[/dim]")
     seeded = external_access.allowed_dirs()
     if seeded:
         console.print(f"[dim]external read paths: {', '.join(seeded)}[/dim]")
@@ -704,6 +737,8 @@ def _run_interactive(mode: str) -> None:
         except (EOFError, KeyboardInterrupt):
             console.print()
             _ask_save_on_exit(client, ws, mode)
+            if recorder is not None:
+                recorder.close(outcome=None)
             console.print("[dim]bye[/dim]")
             break
 
@@ -716,6 +751,8 @@ def _run_interactive(mode: str) -> None:
             arg = parts[1].strip() if len(parts) > 1 else ""
             if cmd in ("/quit", "/exit", "/q"):
                 _ask_save_on_exit(client, ws, mode)
+                if recorder is not None:
+                    recorder.close(outcome=None)
                 console.print("[dim]bye[/dim]")
                 break
             if cmd == "/tools":
@@ -741,6 +778,58 @@ def _run_interactive(mode: str) -> None:
                     continue
                 sp = manual_save(ws, arg, client.messages, model=client.model, mode=mode)
                 console.print(f"[green]saved → {sp.relative_to(ws)}[/green]")
+                continue
+            if cmd in ("/good", "/bad"):
+                if recorder is None:
+                    console.print("[dim]not recording — run with --record or RM_RECORD=1[/dim]")
+                    continue
+                label = cmd[1:]
+                recorder.on_user_label(label, target="last_response", note=arg or None)
+                console.print(f"[dim]labelled last response: {label}[/dim]")
+                continue
+            if cmd == "/outcome":
+                if recorder is None:
+                    console.print("[dim]not recording — run with --record or RM_RECORD=1[/dim]")
+                    continue
+                if arg not in ("success", "partial", "fail"):
+                    console.print("[yellow]usage: /outcome success|partial|fail[/yellow]")
+                    continue
+                recorder.on_user_label("outcome", target="session", note=arg)
+                console.print(f"[dim]session outcome: {arg}[/dim]")
+                continue
+            if cmd == "/redo":
+                last_user_idx = _find_last_user_idx(client.messages)
+                if last_user_idx is None:
+                    console.print("[dim]no prior user turn to redo[/dim]")
+                    continue
+                if recorder is not None:
+                    rejected_msgs = client.messages[last_user_idx + 1:]
+                    if rejected_msgs:
+                        recorder.on_user_label(
+                            "redo_reject",
+                            target="last_response",
+                            note=json.dumps({"n_messages": len(rejected_msgs)}),
+                        )
+                last_user = client.messages[last_user_idx].get("content", "")
+                client.messages = client.messages[:last_user_idx]
+                try:
+                    _do_chat(client, last_user)
+                    auto_save(ws, auto_slot, client.messages, model=client.model, mode=mode)
+                except Exception as e:  # noqa: BLE001
+                    console.print(f"[bold red]error:[/bold red] {e}")
+                continue
+            if cmd == "/branch":
+                if not _has_user_turns(client.messages):
+                    console.print("[dim]nothing to branch (no conversation yet)[/dim]")
+                    continue
+                branch_name = arg or f"branch_{datetime.datetime.now().strftime('%Y%m%dT%H%M%S')}"
+                sp = manual_save(ws, branch_name, client.messages, model=client.model, mode=mode)
+                console.print(
+                    f"[green]branched → {sp.relative_to(ws)}[/green] "
+                    "[dim](current session continues; reload the branch with /load)[/dim]"
+                )
+                if recorder is not None:
+                    recorder.on_user_label("branch", target="session", note=branch_name)
                 continue
             if cmd == "/load":
                 if not arg:
@@ -824,10 +913,17 @@ def _run_interactive(mode: str) -> None:
             console.print(f"[bold red]error:[/bold red] {e}")
 
 
-def _run_oneshot(question: str, mode: str, output: str = "") -> None:
-    set_workspace(Path.cwd())
+def _run_oneshot(question: str, mode: str, output: str = "", record: bool = False) -> None:
+    ws = set_workspace(Path.cwd())
     client = _make_client(mode=mode)
-    response = client.chat(question, on_tool_call=_on_tool_call)
+    recorder = _maybe_make_recorder(record, ws, client.model, mode)
+    if recorder is not None:
+        client.set_recorder(recorder)
+    try:
+        response = client.chat(question, on_tool_call=_on_tool_call)
+    finally:
+        if recorder is not None:
+            recorder.close(outcome=None)
     console.print()
     console.print(Markdown(response))
     if output:
@@ -962,6 +1058,139 @@ def _run_validate(path: str) -> None:
         console.print(f"[red]✗ workspace incomplete[/red]: missing {result['missing']}")
 
 
+def _resolve_trajectory_id(ws: Path, session_id: str) -> Path | None:
+    root = ws / ".research_manager_sessions" / "trajectories"
+    if not root.exists():
+        return None
+    if session_id == "latest":
+        dirs = [d for d in root.iterdir() if d.is_dir()]
+        if not dirs:
+            return None
+        return max(dirs, key=lambda d: d.stat().st_mtime)
+    candidate = root / session_id
+    return candidate if candidate.is_dir() else None
+
+
+def _run_sessions_subcommand(args) -> None:
+    sub = getattr(args, "sessions_cmd", None) or "list"
+    ws = Path(getattr(args, "path", ".")).resolve()
+    if sub == "list":
+        _print_sessions(ws)
+        traj_root = ws / ".research_manager_sessions" / "trajectories"
+        if traj_root.exists():
+            traj = sorted(traj_root.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True)
+            if traj:
+                table = Table(title="Trajectories", show_header=True, header_style="bold cyan")
+                table.add_column("Session ID", style="green")
+                table.add_column("Started", style="dim")
+                table.add_column("Steps", justify="right")
+                table.add_column("Outcome")
+                for d in traj:
+                    meta_p = d / "meta.json"
+                    if not meta_p.exists():
+                        continue
+                    try:
+                        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    table.add_row(
+                        d.name,
+                        (meta.get("started_at", "") or "")[:19],
+                        str(meta.get("n_steps", "")),
+                        str(meta.get("outcome") or "—"),
+                    )
+                console.print(table)
+        return
+    if sub == "trace":
+        target = _resolve_trajectory_id(ws, args.session_id)
+        if target is None:
+            console.print(f"[red]trajectory not found: {args.session_id}[/red]")
+            return
+        _print_trajectory_trace(target)
+        return
+    if sub == "analyze":
+        target = _resolve_trajectory_id(ws, args.session_id)
+        if target is None:
+            console.print(f"[red]trajectory not found: {args.session_id}[/red]")
+            return
+        from research_manager.recording.analysis import analyze_trajectory
+        report = analyze_trajectory(target)
+        console.print_json(data=report)
+        return
+    if sub == "prune":
+        traj_root = ws / ".research_manager_sessions" / "trajectories"
+        if not traj_root.exists():
+            console.print("[dim]no trajectories to prune[/dim]")
+            return
+        dirs = sorted(
+            (d for d in traj_root.iterdir() if d.is_dir()),
+            key=lambda d: d.stat().st_mtime,
+        )
+        excess = max(0, len(dirs) - args.keep)
+        from research_manager.recording.recorder import _rmtree
+        for d in dirs[:excess]:
+            _rmtree(d)
+        console.print(f"[green]pruned {excess} trajectory directories (kept {len(dirs) - excess})[/green]")
+        return
+    console.print("[yellow]usage: easy-research sessions [list|trace <id>|analyze <id>|prune][/yellow]")
+
+
+def _print_trajectory_trace(traj_dir: Path) -> None:
+    meta_p = traj_dir / "meta.json"
+    events_p = traj_dir / "events.jsonl"
+    if not meta_p.exists() or not events_p.exists():
+        console.print(f"[red]incomplete trajectory at {traj_dir}[/red]")
+        return
+    try:
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        console.print(f"[red]meta unreadable: {e}[/red]")
+        return
+
+    console.print(Panel(
+        f"session_id : {meta.get('session_id', '')}\n"
+        f"model      : {meta.get('model', '')}\n"
+        f"mode       : {meta.get('mode', '')}\n"
+        f"started_at : {meta.get('started_at', '')}\n"
+        f"ended_at   : {meta.get('ended_at') or '—'}\n"
+        f"n_steps    : {meta.get('n_steps', '')}\n"
+        f"outcome    : {meta.get('outcome') or '—'}\n"
+        f"git_commit : {meta.get('git_commit') or '—'}",
+        title="trajectory",
+        border_style="cyan",
+    ))
+
+    counts: dict[str, int] = {}
+    tool_calls: list[tuple[int, str, float]] = []
+    user_labels: list[tuple[str, str]] = []
+    with events_p.open(encoding="utf-8") as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = ev.get("type", "")
+            counts[t] = counts.get(t, 0) + 1
+            if t == "tool_call_end":
+                tool_calls.append((ev.get("step", -1), ev.get("name", ""), ev.get("duration_ms", 0.0)))
+            elif t == "user_label":
+                user_labels.append((ev.get("label", ""), ev.get("note") or ""))
+
+    console.print(f"[dim]event counts: {counts}[/dim]")
+    if tool_calls:
+        table = Table(title="Tool calls", show_header=True, header_style="bold cyan")
+        table.add_column("Step", justify="right")
+        table.add_column("Tool", style="green")
+        table.add_column("Duration (ms)", justify="right", style="dim")
+        for step, name, ms in tool_calls:
+            table.add_row(str(step), name, f"{ms:.1f}")
+        console.print(table)
+    if user_labels:
+        console.print("[bold]user labels:[/bold]")
+        for label, note in user_labels:
+            console.print(f"  [magenta]{label}[/magenta] {note}")
+
+
 def main() -> None:
     # Search for .env starting from the current working directory upward,
     # not from the cli.py module location (which is where dotenv defaults to
@@ -997,6 +1226,23 @@ def main() -> None:
     p_batch.add_argument("-w", "--workers", type=int, default=1, help="Parallel workers")
     p_batch.add_argument("-m", "--mode", default="base", choices=["base", "article", "blog", "book"])
 
+    # sessions: list / trace / prune trajectory recordings
+    p_sess = sub.add_parser("sessions", help="Inspect saved sessions and trajectory recordings")
+    sess_sub = p_sess.add_subparsers(dest="sessions_cmd")
+    p_sess_list = sess_sub.add_parser("list", help="List sessions and recorded trajectories")
+    p_sess_list.add_argument("path", nargs="?", default=".", help="Workspace path (default: current dir)")
+    p_sess_trace = sess_sub.add_parser("trace", help="Print a trajectory summary")
+    p_sess_trace.add_argument("session_id", help="Trajectory session id (or 'latest')")
+    p_sess_trace.add_argument("path", nargs="?", default=".", help="Workspace path")
+    p_sess_prune = sess_sub.add_parser("prune", help="Prune old trajectory recordings")
+    p_sess_prune.add_argument("--keep", type=int, default=50, help="How many recent trajectories to keep")
+    p_sess_prune.add_argument("path", nargs="?", default=".", help="Workspace path")
+    p_sess_analyze = sess_sub.add_parser(
+        "analyze", help="Run Tier 2 derived-signal analysis over a trajectory"
+    )
+    p_sess_analyze.add_argument("session_id", help="Trajectory session id (or 'latest')")
+    p_sess_analyze.add_argument("path", nargs="?", default=".", help="Workspace path")
+
     # default args (chat / oneshot)
     parser.add_argument("question", nargs="?", default=None, help="A single question; omit for REPL.")
     parser.add_argument("-f", "--file", default=None, help="Read question from a file.")
@@ -1005,6 +1251,8 @@ def main() -> None:
                         help="Writing mode (default: base).")
     parser.add_argument("--auto-approve", action="store_true",
                         help="Auto-save script proposals without prompting (for batch/CI sessions).")
+    parser.add_argument("--record", action="store_true",
+                        help="Record a trajectory under .research_manager_sessions/trajectories/.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
@@ -1024,21 +1272,24 @@ def main() -> None:
     if args.command == "batch":
         _run_batch(args.file, output_dir=args.output, workers=args.workers, mode=args.mode)
         return
+    if args.command == "sessions":
+        _run_sessions_subcommand(args)
+        return
 
     if args.file:
         question = Path(args.file).read_text(encoding="utf-8").strip()
         if question:
-            _run_oneshot(question, mode=args.mode, output=args.output)
+            _run_oneshot(question, mode=args.mode, output=args.output, record=args.record)
         return
     if args.question:
-        _run_oneshot(args.question, mode=args.mode, output=args.output)
+        _run_oneshot(args.question, mode=args.mode, output=args.output, record=args.record)
         return
     if not sys.stdin.isatty():
         question = sys.stdin.read().strip()
         if question:
-            _run_oneshot(question, mode=args.mode, output=args.output)
+            _run_oneshot(question, mode=args.mode, output=args.output, record=args.record)
         return
-    _run_interactive(mode=args.mode)
+    _run_interactive(mode=args.mode, record=args.record)
 
 
 if __name__ == "__main__":

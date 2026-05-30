@@ -143,6 +143,10 @@ Environment variables:
 | `RM_TOOL_TIMEOUT` | Default script/tool execution timeout (s) | `300` |
 | `RM_WORKSPACE` | Override workspace path | (current dir) |
 | `RM_EXTERNAL_READ_PATHS` | Colon-separated directories the agent may read via `read_external_file` | (empty) |
+| `RM_RECORD` | `1` to record a trajectory to `.research_manager_sessions/trajectories/` | (off) |
+| `RM_RECORD_KEEP` | Rolling window: how many recent trajectories to keep | `50` |
+| `RM_RECORD_COUNTERFACTUALS` | `1` to also shadow-sample one alternate completion per LLM call | (off) |
+| `RM_COUNTERFACTUAL_TEMP` | Temperature used for counterfactual samples | `0.7` |
 | `CONDA_EXE` | Path to conda executable | (from PATH) |
 
 ## CLI
@@ -157,9 +161,14 @@ easy-research validate [path]          # check workspace structure
 easy-research clean [path]             # wipe workspace contents (keeps .env)
 easy-research batch questions.md -w 4  # parallel batch mode
 easy-research --auto-approve ...       # skip script-proposal prompts
+easy-research --record                 # record a trajectory for future RL data
+easy-research sessions list            # list saved sessions + trajectories
+easy-research sessions trace <id>      # summary of a recorded trajectory
+easy-research sessions analyze <id>    # Tier 2 derived signals as JSON
+easy-research sessions prune --keep N  # manually trim trajectories
 ```
 
-REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/package <name>`, `/env scan|plan`, `/sessions`, `/save [name]`, `/load <name>`, `/reset`, `/help`, `/quit`.
+REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/package <name>`, `/env scan|plan`, `/sessions`, `/save [name]`, `/load <name>`, `/branch [name]`, `/good [note]`, `/bad [note]`, `/outcome <kind>`, `/redo`, `/reset`, `/help`, `/quit`.
 
 ### Reading files outside the workspace
 
@@ -391,6 +400,103 @@ Conversations are automatically saved and can be manually preserved or restored.
 - **Exit prompt**: on `/quit` or Ctrl-C/Ctrl-D, if the conversation has user
   turns, the REPL asks whether to manually save before exiting.
 
+### Phase 11: Trajectory Recorder ✅
+
+A passive recorder layered onto the existing tool-calling loop. Every real
+project run produces structured data future-usable for MCTS warm-start, SFT,
+or DPO — without changing the user-facing flow. Four tiers, increasing cost
+and value.
+
+Storage layout:
+```
+.research_manager_sessions/
+├── trajectories/<session_id>/
+│   ├── meta.json           # model, git commit, mode, started_at, n_steps, outcome
+│   ├── events.jsonl        # append-only raw event stream
+│   └── snapshots/
+│       └── step_<i>.json   # {path: sha256} manifest at each tool_call boundary
+└── objects/<sha[:2]>/<sha[2:]>   # content-addressed blob store, shared across sessions
+```
+
+Enable: `easy-research --record` or `RM_RECORD=1`. Inspect:
+`easy-research sessions list|trace <id>|analyze <id>|prune --keep N`.
+
+#### Tier 1 — Protocol-layer recorder (opt-in, ~zero overhead) ✅
+- [x] `research_manager/recording/recorder.py` — `TrajectoryRecorder` class:
+      events.jsonl writer + content-addressed snapshot manager.
+- [x] Event types: `user_message`, `llm_request`, `llm_response`,
+      `tool_call_start`, `tool_call_end`, `subprocess_exit`, `user_label`,
+      `counterfactual`.
+- [x] Hook via existing `on_tool_call` / `on_response` callbacks on
+      `ResearchLLMClient.chat()` — **no core changes**. Plus
+      `client.set_recorder(rec)` to attach a recorder.
+- [x] Tier 1.5 — `executor/runner.py` emits `subprocess_exit` events
+      (returncode, timed_out, duration, stdout/stderr hashes) via a
+      module-level `set_active_recorder` hook.
+- [x] Snapshot at every tool_call boundary (not message boundary) — content
+      dedup keeps storage small. Also a step_0 snapshot at session start.
+- [x] Store `tool_call.arguments` as raw JSON string, never re-serialized
+      (preserves byte-level reproducibility).
+- [x] Retention: keep last `RM_RECORD_KEEP` (default 50) trajectories;
+      content-addressed `objects/` are shared across sessions.
+
+#### Tier 2 — Derived behavior signals (offline, free) ✅
+Computed by `research_manager/recording/analysis.py` from Tier 1 raw events;
+no runtime cost. Run via `easy-research sessions analyze <id>`.
+- [x] User-edits-after-agent diff (high-quality supervised correction signal).
+- [x] File survival rate (agent-written files alive at session end vs
+      overwritten/deleted).
+- [x] Rerun pattern detection (same tool + same args_hash run twice → first run
+      likely failed).
+- [x] Tool-output citation graph (which later tool_calls reference earlier
+      output paths in their args).
+- [x] Lightweight intent classifier on user messages
+      (`不对 / 重做 / instead / wrong / redo` → implicit reject of last LLM turn).
+
+#### Tier 3 — Explicit reward gestures (opt-in, gold standard) ✅
+- [x] `/good [note]` and `/bad [note]` — label most recent LLM response.
+- [x] `/outcome success|partial|fail` — label entire session at end.
+- [x] `/redo` — regenerate last response after recording a `redo_reject`
+      label that captures the prior assistant turn count (free preference-pair
+      seed).
+- [x] `/branch [name]` — fork: snapshot current messages + workspace state
+      under a new saved-session name; current session keeps recording.
+
+#### Tier 4 — Counterfactual sampling (opt-in, ~30% extra completion tokens) ✅
+- [x] `RM_RECORD_COUNTERFACTUALS=1` toggle (additional to `RM_RECORD=1`).
+- [x] At each LLM call, also sample one alternate completion at
+      `RM_COUNTERFACTUAL_TEMP` (default 0.7); record without executing.
+- [x] Yields `(state, chosen, rejected)` triples — DPO-ready format,
+      reconstructible from `events.jsonl` + `objects/`.
+
+#### Wiring & CLI ✅
+- [x] `--record` CLI flag and `RM_RECORD=1` env var.
+- [x] `easy-research sessions list` — show saved sessions + recorded trajectories.
+- [x] `easy-research sessions trace <id>` — print trajectory summary.
+- [x] `easy-research sessions analyze <id>` — Tier 2 derived signals as JSON.
+- [x] `easy-research sessions prune --keep N` — manual retention override.
+- [x] REPL: `/good /bad /outcome /redo /branch` slash commands.
+
+#### Resolved decisions (2026-05-30)
+- [x] **Default**: opt-in via `--record` flag or `RM_RECORD=1` env var.
+      Nothing is recorded unless the user explicitly enables it.
+- [x] **Tier 4 default**: off. Counterfactual sampling requires
+      `RM_RECORD_COUNTERFACTUALS=1` (and `RM_RECORD=1`) on top.
+- [x] **Storage path**: `.research_manager_sessions/trajectories/<session_id>/`
+      — reuses the existing sessions directory.
+- [x] **Retention**: rolling window of the last 50 trajectories per workspace.
+      Oldest trajectories are pruned on new-session creation. Manual override
+      via `easy-research sessions prune --keep N`. Content-addressed `objects/`
+      are GC'd when no surviving snapshot references them.
+- [x] **`/branch`**: yes. REPL command copies current messages + latest
+      workspace snapshot manifest to a new session_id; both branches continue
+      independently. Cheap to implement on top of the snapshot store.
+
+#### Out of scope for Phase 11
+The MCTS search loop itself, scbench integration, and any RL training are
+**not** part of this phase. See `dev_proj/scbench_rl_design.md` for the
+separate active-search design (currently shelved).
+
 ### Completed
 - [x] Define workspace directory structure (`demo_work_dir/`) — 2026-05-14
 - [x] Initial README and project design — 2026-05-14
@@ -414,7 +520,12 @@ See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## Status
 
-Phases 1–10 implemented. The CLI installs as `easy-research` and exposes 29 LLM-callable tools across `code`, `writing`, `project`, and `dynamic` categories. Article-mode prompt and helpers are tuned to Nature/Nature Communications writing patterns (argument-first, hourglass, bounded claims).
+Phases 1–11 implemented. The CLI installs as `easy-research` and exposes 29
+LLM-callable tools across `code`, `writing`, `project`, and `dynamic`
+categories. Article-mode prompt and helpers are tuned to Nature/Nature
+Communications writing patterns (argument-first, hourglass, bounded claims).
+Trajectory recording (opt-in via `--record` / `RM_RECORD=1`) captures the full
+event stream + content-addressed workspace snapshots for future RL/MCTS work.
 
 ## License
 

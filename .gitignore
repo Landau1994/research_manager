@@ -34,3 +34,9 @@ output/
 
 # Workspace state (when running CLI from project root)
 .research_manager_state.json
+
+# Trajectory recordings (Phase 11)
+.research_manager_sessions/
+
+# Upstream third-party repos cloned for reference under dev_proj/
+dev_proj/scbench/
