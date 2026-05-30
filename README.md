@@ -210,6 +210,15 @@ Behavior:
 - `name@host.com` style emails are not misinterpreted (the path must resolve to
   an existing file or directory).
 
+**Tab completion.** Inside the REPL, pressing Tab while typing an `@<partial>`
+token completes against the workspace (and `~/...`, absolute paths). It
+descends into subdirectories — `@script/<TAB>` lists everything under
+`script/`, `@script/f<TAB>` filters by prefix. Tab on a leading `/` completes
+slash commands (`/he<TAB>` → `/help`). Up/Down browses input history; Ctrl-R
+does a reverse search. Backspace correctly deletes one character at a time on
+CJK input (the REPL uses `prompt_toolkit` for line editing rather than the
+default cooked-mode `input()`).
+
 See [examples/quickstart.md](examples/quickstart.md) for a walkthrough.
 
 ## Roadmap

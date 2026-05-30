@@ -20,6 +20,7 @@ from rich.table import Table
 
 from research_manager import __version__
 from research_manager.cli_atrefs import expand_at_refs
+from research_manager.cli_prompt import make_session, read_input
 from research_manager.context import get_workspace, set_workspace
 from research_manager.llm.client import ResearchLLMClient
 from research_manager.llm.prompts import BASE_SYSTEM_PROMPT, excluded_tools_for, writing_prompt_for
@@ -62,6 +63,8 @@ def _print_tools() -> None:
 def _print_help() -> None:
     console.print(
         "[dim]Input: include `@<path>` to attach a file or directory to your message.\n"
+        "       Press Tab inside an `@<partial>` token to complete from the workspace\n"
+        "       (and Tab on a leading `/` to complete commands).\n"
         "       Small text files are inlined; large/non-text files become a hint;\n"
         "       directories show a shallow listing. External paths must be /allow'd.\n\n"
         "Commands:\n"
@@ -725,6 +728,10 @@ def _run_interactive(mode: str, record: bool = False) -> None:
     if recorder is not None:
         client.set_recorder(recorder)
 
+    # Single PromptSession for the whole REPL — keeps history across turns
+    # and gives us proper CJK-aware line editing + `@<path>` Tab completion.
+    prompt_session = make_session(console, get_workspace)
+
     console.print(f"[dim]model: {client.model}[/dim]")
     if client.base_url:
         console.print(f"[dim]base_url: {client.base_url}[/dim]")
@@ -736,11 +743,12 @@ def _run_interactive(mode: str, record: bool = False) -> None:
     seeded = external_access.allowed_dirs()
     if seeded:
         console.print(f"[dim]external read paths: {', '.join(seeded)}[/dim]")
-    console.print("[dim]Type a message, or /help for commands.[/dim]\n")
+    console.print("[dim]Type a message, or /help for commands. "
+                  "Tab completes `@<path>` and /commands.[/dim]\n")
 
     while True:
         try:
-            user_input = console.input("[bold green]you > [/bold green]").strip()
+            user_input = read_input(prompt_session, console, "[bold green]you > [/bold green]").strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             _ask_save_on_exit(client, ws, mode)

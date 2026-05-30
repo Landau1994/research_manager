@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Tab-completion for `@<path>` and `/commands` in the REPL (2026-05-30):
+  - `research_manager/cli_prompt.py` — new module wrapping `prompt_toolkit` with an `_AtPathCompleter` that scans the cursor-left text for the closest standalone `@` (whitespace-separated, so `email@host` is *not* matched) and lists the resolved directory's children. Workspace-relative, `~`-expanded, and absolute paths all complete; subdirectory navigation (`@script/<TAB>`, `@script/f<TAB>`) works incrementally; directories are suffixed with `/`. Slash commands (`/help`, `/mode`, `/load`, …) complete on Tab when the line begins with `/`.
+  - In-memory command history (Up/Down browse, Ctrl-R reverse search) for the REPL session.
+  - rich's color markup is captured into a `prompt_toolkit.ANSI` object (forced color regardless of stdout TTY state) so the existing green `you > ` prompt renders identically.
+  - `pyproject.toml` — added `prompt_toolkit>=3.0` to runtime dependencies.
+
+### Fixed
+- REPL backspace deleting only part of a CJK character (2026-05-30):
+  - Root cause: the previous `console.input()` used Python's built-in cooked-mode `input()`, which on many terminals erases by *byte* rather than by character — so backspacing over a 3-byte UTF-8 character left a half-character residue (or chopped the byte sequence and corrupted the line).
+  - Fix: `_run_interactive` now reads input through a `prompt_toolkit.PromptSession`, which owns line editing in raw mode and tracks character widths itself. Falls back to `console.input` if `prompt_toolkit` is unavailable or stdin is not a TTY (e.g. piped input in tests).
+
 - `@<path>` references in REPL and one-shot input (2026-05-30):
   - `research_manager/cli_atrefs.py` — `expand_at_refs(text, workspace)` parses `@<path>` tokens and returns an augmented user message plus per-attachment status notes for the REPL to print.
   - Hybrid resolution policy: text files ≤ 50 KB inlined verbatim (zero tool round-trip); larger files / non-text extensions become a one-line `read_text_file` / `read_external_file` hint; directories show a shallow listing capped at 30 entries with a `list_workspace` hint.
