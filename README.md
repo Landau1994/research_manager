@@ -494,8 +494,9 @@ no runtime cost. Run via `easy-research sessions analyze <id>`.
 
 #### Out of scope for Phase 11
 The MCTS search loop itself, scbench integration, and any RL training are
-**not** part of this phase. See `dev_proj/scbench_rl_design.md` for the
-separate active-search design (currently shelved).
+**not** part of this phase. The active-search alternative was considered
+but shelved in favor of the passive recorder, which collects RL-training
+data from real sessions without the cost of running full simulations.
 
 ### Completed
 - [x] Define workspace directory structure (`demo_work_dir/`) — 2026-05-14

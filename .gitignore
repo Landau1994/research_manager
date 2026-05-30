@@ -38,5 +38,5 @@ output/
 # Trajectory recordings (Phase 11)
 .research_manager_sessions/
 
-# Upstream third-party repos cloned for reference under dev_proj/
-dev_proj/scbench/
+# Local-only experimental / reference workspace
+dev_proj/
