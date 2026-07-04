@@ -20,7 +20,7 @@ def run_python(script: str, env: str, timeout: int) -> str:
     """Run a Python script inside a conda environment.
 
     Args:
-        script: Path to the .py file (relative paths resolve against the workspace, then under script/).
+        script: Path to the .py file (relative paths resolve against the workspace, then code/python/, then legacy script/).
         env: Conda environment name. Pass empty string to use the current environment.
         timeout: Wall-clock timeout in seconds.
     """
@@ -37,7 +37,7 @@ def run_r(script: str, env: str, timeout: int) -> str:
     """Run an R script inside a conda environment.
 
     Args:
-        script: Path to the .R/.r file (relative paths resolve against the workspace, then under script/).
+        script: Path to the .R/.r file (relative paths resolve against the workspace, then code/r/, then legacy script/).
         env: Conda environment name. Pass empty string to use the current environment.
         timeout: Wall-clock timeout in seconds.
     """

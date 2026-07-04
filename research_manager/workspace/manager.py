@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-WORKSPACE_DIRS = ["data", "script", "res", "report", "packages"]
+WORKSPACE_DIRS = ["data", "code", "script", "res", "report", "packages"]
+CODE_SUBDIRS = ["r", "python", "bash"]
+CODE_FILES = ["code/r/setup_packages.R", "code/bash/setup_packages.sh"]
 RES_SUBDIRS = ["fig", "h5ad", "python_obj", "r_obj", "txt"]
 REPORT_KINDS = ["article", "blog", "book"]
 
@@ -31,6 +33,35 @@ OPENAI_API_KEY=your-api-key-here
 # RM_TOOL_TIMEOUT=300
 """
 
+_SETUP_PACKAGES_R_CONTENT = """\
+options(repos = c(
+  CRAN = "https://mirrors.ustc.edu.cn/CRAN",
+  BioCsoft = "https://mirrors.westlake.edu.cn/bioconductor/packages/3.22/bioc",
+  BioCann = "https://mirrors.westlake.edu.cn/bioconductor/packages/3.22/data/annotation"
+))
+options(BioC_mirror = "https://mirrors.westlake.edu.cn/bioconductor")
+
+packages <- c(
+  "tidyverse"
+)
+
+missing <- packages[!vapply(packages, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing)) {
+  install.packages(missing)
+}
+"""
+
+_SETUP_PACKAGES_SH_CONTENT = """\
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Add project-specific shell setup commands here.
+"""
+
+_PYTHON_REQUIREMENTS_CONTENT = """\
+# Add project-specific Python packages here, one per line.
+"""
+
 
 def init_workspace(path: str | Path, force: bool = False) -> dict:
     """Create the standard directory structure at `path`.
@@ -46,6 +77,11 @@ def init_workspace(path: str | Path, force: bool = False) -> dict:
     for sub in WORKSPACE_DIRS:
         d = root / sub
         (created if not d.exists() else existed).append(sub)
+        d.mkdir(parents=True, exist_ok=True)
+    for sub in CODE_SUBDIRS:
+        d = root / "code" / sub
+        rel = f"code/{sub}"
+        (created if not d.exists() else existed).append(rel)
         d.mkdir(parents=True, exist_ok=True)
     for sub in RES_SUBDIRS:
         d = root / "res" / sub
@@ -68,6 +104,19 @@ def init_workspace(path: str | Path, force: bool = False) -> dict:
         env_example.write_text(_ENV_EXAMPLE_CONTENT, encoding="utf-8")
         created.append(".env.example")
 
+    scaffold_files = {
+        "code/r/setup_packages.R": _SETUP_PACKAGES_R_CONTENT,
+        "code/bash/setup_packages.sh": _SETUP_PACKAGES_SH_CONTENT,
+        "code/python/requirements.txt": _PYTHON_REQUIREMENTS_CONTENT,
+    }
+    for rel, content in scaffold_files.items():
+        p = root / rel
+        if not p.exists():
+            p.write_text(content, encoding="utf-8")
+            created.append(rel)
+            if rel.endswith(".sh"):
+                p.chmod(0o755)
+
     return {
         "workspace": str(root),
         "created": created,
@@ -83,6 +132,12 @@ def validate_workspace(path: str | Path) -> dict:
     for sub in WORKSPACE_DIRS:
         if not (root / sub).is_dir():
             missing.append(sub)
+    for sub in CODE_SUBDIRS:
+        if not (root / "code" / sub).is_dir():
+            missing.append(f"code/{sub}")
+    for rel in CODE_FILES:
+        if not (root / rel).is_file():
+            missing.append(rel)
     for sub in RES_SUBDIRS:
         if not (root / "res" / sub).is_dir():
             missing.append(f"res/{sub}")

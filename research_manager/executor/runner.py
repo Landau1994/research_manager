@@ -51,7 +51,7 @@ def _conda_executable() -> str | None:
     exe = os.environ.get("CONDA_EXE")
     if exe and Path(exe).exists():
         return exe
-    return shutil.which("conda") or shutil.which("mamba")
+    return shutil.which("conda")
 
 
 def _snapshot_dir(root: Path, watch_dirs: list[str]) -> dict[str, float]:
@@ -135,7 +135,7 @@ class ScriptRunner:
         return self._run(cmd, timeout=timeout)
 
     def _build_python_cmd(self, script: str, env: str | None, args: list[str]) -> list[str]:
-        script_path = self._resolve_script(script)
+        script_path = self._resolve_script(script, language="python")
         if env:
             conda = _conda_executable()
             if conda is None:
@@ -144,7 +144,7 @@ class ScriptRunner:
         return ["python", str(script_path), *args]
 
     def _build_r_cmd(self, script: str, env: str | None, args: list[str]) -> list[str]:
-        script_path = self._resolve_script(script)
+        script_path = self._resolve_script(script, language="r")
         if env:
             conda = _conda_executable()
             if conda is None:
@@ -152,11 +152,18 @@ class ScriptRunner:
             return [conda, "run", "-n", env, "--no-capture-output", "Rscript", str(script_path), *args]
         return ["Rscript", str(script_path), *args]
 
-    def _resolve_script(self, script: str) -> Path:
+    def _resolve_script(self, script: str, language: str | None = None) -> Path:
         p = Path(script)
         if not p.is_absolute():
-            # Try as-is (relative to workspace), then under script/
-            candidates = [self.workspace / p, self.workspace / "script" / p]
+            # Try as-is, then the language-specific code directory, then legacy script/.
+            candidates = [self.workspace / p]
+            if language == "python":
+                candidates.append(self.workspace / "code" / "python" / p)
+            elif language == "r":
+                candidates.append(self.workspace / "code" / "r" / p)
+            elif language == "shell":
+                candidates.append(self.workspace / "code" / "bash" / p)
+            candidates.append(self.workspace / "script" / p)
             for c in candidates:
                 if c.exists():
                     return c

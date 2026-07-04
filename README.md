@@ -10,6 +10,9 @@ git clone https://github.com/Landau1994/research_manager.git
 cd research_manager
 pip install -e .
 
+# For development/testing:
+# pip install -e ".[dev]"
+
 # Or install directly with pip (no clone):
 # pip install git+https://github.com/Landau1994/research_manager.git
 
@@ -17,17 +20,22 @@ pip install -e .
 cp .env.example .env
 # edit .env and set OPENAI_API_KEY=...
 
-# 3. Create a project workspace
-mkdir my_project && cd my_project
-easy-research init .   # also drops a .env.example into the new workspace
+# 3. Optional: configure R support in conda
+# Defaults to the current conda env, configures USTC/Westlake R mirrors,
+# installs r-base=4.5.3 plus missing build/system deps, then installs tidyverse.
+easy-research setup-r
 
-# 4. Drop your data into data/ and your scripts into script/, then chat:
+# 4. Create a project workspace
+mkdir my_project && cd my_project
+easy-research init .   # also drops a .env.example and can optionally configure R
+
+# 5. Drop your data into data/ and your scripts into code/<language>/, then chat:
 easy-research
 ```
 
 Inside the REPL:
 ```
-you > run script/analyze.py inside the conda env "data-sci"
+you > run code/python/analyze.py inside the conda env "data-sci"
 you > /mode article
 you > draft an introduction based on res/txt/summary.csv
 you > /quit
@@ -60,7 +68,11 @@ Each managed project follows a standardized layout:
 ```
 project_dir/
 ├── data/              # Raw/input data
-├── script/            # Analysis and processing scripts
+├── code/              # Analysis and processing scripts
+│   ├── python/        # Python scripts and auto-populated requirements.txt
+│   ├── r/             # R scripts and setup_packages.R
+│   └── bash/          # Shell scripts and setup_packages.sh
+├── script/            # Legacy script location, still supported
 ├── res/               # Results and intermediate outputs
 │   ├── fig/           # Figures and visualizations
 │   ├── h5ad/          # HDF5 annotated data (bioinformatics)
@@ -159,6 +171,7 @@ easy-research -f question.md           # read from file
 easy-research init [path]              # create workspace layout
 easy-research validate [path]          # check workspace structure
 easy-research clean [path]             # wipe workspace contents (keeps .env)
+easy-research setup-r                  # configure R/tidyverse in a conda env
 easy-research batch questions.md -w 4  # parallel batch mode
 easy-research --auto-approve ...       # skip script-proposal prompts
 easy-research --record                 # record a trajectory for future RL data
@@ -169,6 +182,43 @@ easy-research sessions prune --keep N  # manually trim trajectories
 ```
 
 REPL commands: `/tools`, `/mode <kind>`, `/workspace`, `/allow <dir>`, `/allowed`, `/deny <dir>`, `/package <name>`, `/env scan|plan`, `/sessions`, `/save [name]`, `/load <name>`, `/branch [name]`, `/remember <fact>`, `/memory`, `/good [note]`, `/bad [note]`, `/outcome <kind>`, `/redo`, `/reset`, `/help`, `/quit`.
+
+### Optional R Setup
+
+After installing the package, run:
+
+```bash
+easy-research setup-r
+```
+
+When you first run `easy-research init` in a new workspace, the CLI also asks
+whether to configure R immediately. The setup helper defaults to the currently
+active conda environment (`CONDA_DEFAULT_ENV`). It first checks whether that
+environment already has R and the R package `tidyverse`. Missing pieces are
+installed with:
+
+```bash
+conda install -n <env> -c conda-forge -y r-base=4.5.3 pkg-config rust libuv curl libcurl
+easy-research configure-r-repos -n <env>
+conda run -n <env> Rscript -e "install.packages('tidyverse')"
+```
+
+You can choose a different environment or only print the planned commands:
+
+```bash
+easy-research setup-r --env my-r-env
+easy-research setup-r --dry-run
+easy-research setup-r --yes
+```
+
+### Development
+
+Install the package with test dependencies:
+
+```bash
+pip install -e ".[dev]"
+python -m pytest -q
+```
 
 ### Reading files outside the workspace
 
@@ -194,7 +244,7 @@ Inside any user message you can include `@<path>` tokens to attach files or
 directories to the prompt:
 
 ```
-you > review @script/clean.py and compare with @docs/style.md
+you > review @code/python/clean.py and compare with @docs/style.md
 you > what's in @res/?
 you > @~/refs/dataset.csv  ← needs /allow first
 ```
@@ -212,8 +262,8 @@ Behavior:
 
 **Tab completion.** Inside the REPL, pressing Tab while typing an `@<partial>`
 token completes against the workspace (and `~/...`, absolute paths). It
-descends into subdirectories — `@script/<TAB>` lists everything under
-`script/`, `@script/f<TAB>` filters by prefix. Tab on a leading `/` completes
+descends into subdirectories — `@code/<TAB>` lists everything under
+`code/`, `@code/python/f<TAB>` filters by prefix. Tab on a leading `/` completes
 slash commands (`/he<TAB>` → `/help`). Up/Down browses input history; Ctrl-R
 does a reverse search. Backspace correctly deletes one character at a time on
 CJK input (the REPL uses `prompt_toolkit` for line editing rather than the
@@ -286,12 +336,12 @@ across REPL restarts.
 
 Allow the agent to author **ad-hoc, project-specific code** during a session,
 execute it, show the result, and then ask the user whether to *promote* the
-snippet into a permanent script under `script/`.
+snippet into a permanent script under `code/<language>/`.
 
 Motivation: the original built-in tools are generic (run_python, write_report, …).
 Real projects accumulate domain-specific operations (e.g. "normalize this lab's
 flow-cytometry export", "compute the in-house QC score"). Today the user has
-to hand-edit `script/*.py`. Phase 6 lets the LLM propose, run, and persist
+to hand-edit scripts under `code/`. Phase 6 lets the LLM propose, run, and persist
 those snippets through the same conversational loop.
 
 Tools (registered under category `dynamic`):
@@ -307,23 +357,23 @@ Tools (registered under category `dynamic`):
 2. **REPL confirmation** — when `_on_tool_call` sees a `propose_script` call,
    the REPL pauses, shows a syntax-highlighted preview, and prompts:
    ```
-   save proposal <id> → script/<name>.{py,R,sh}? (y/N/edit/rename):
+   save proposal <id> → code/<language>/<name>.{py,R,sh}? (y/N/edit/rename):
    ```
    - `y` → call `save_proposed_script(id)` automatically.
    - `edit` → open `$EDITOR` on the proposal file, then save.
    - `rename` → ask for a new filename, then save.
    - `N` → leave the proposal in `res/_proposals/` for later.
 
-   If `script/<name>` already exists, a second prompt offers
+   If the target script already exists, a second prompt offers
    *overwrite / rename / cancel*. On overwrite, the prior version is backed
    up into `res/_proposals/<stem>_backup_<ts>.<ext>`.
 
 3. **`save_proposed_script(proposal_id, target_name, overwrite)`** — promote a
-   proposal to `script/<name>`. The proposal file and its `.json` sidecar are
+   proposal to `code/<language>/<name>`. The proposal file and its `.json` sidecar are
    removed once promoted.
 
 4. **`revise_script(name, new_code, description, run, conda_env, timeout)`** —
-   LLM can rewrite an existing `script/<name>`. The previous version is
+   LLM can rewrite an existing script under `code/` or legacy `script/`. The previous version is
    always copied to `res/_proposals/<stem>_rev_<ts>.<ext>` first, then the
    new code is written (and optionally executed).
 
@@ -402,7 +452,7 @@ plans, let the user pick one, and optionally execute it.
 
 Tools (category `dynamic`):
 
-- **`scan_dependencies(include_packages)`** — walks `script/` (and optionally
+- **`scan_dependencies(include_packages)`** — walks `code/`, legacy `script/` (and optionally
   `packages/*/src/`), parses Python files with `ast` (filters stdlib via
   `sys.stdlib_module_names`) and R files with regex on `library()` /
   `require()`. Returns top-level Python imports + R packages plus a

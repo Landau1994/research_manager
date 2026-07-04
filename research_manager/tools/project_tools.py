@@ -87,7 +87,7 @@ def add_task_tool(task_id: str, description: str, command: str, depends_on: list
     Args:
         task_id: Unique identifier.
         description: Human-readable description.
-        command: A short string describing the command/script (e.g. "run_python script/clean.py").
+        command: A short string describing the command/script (e.g. "run_python code/python/clean.py").
         depends_on: List of task ids that must complete before this one.
     """
     ws = get_workspace()

@@ -4,7 +4,7 @@ Workflow:
 1. `propose_script` writes a snippet to `res/_proposals/`, optionally executes it,
    and returns the result tagged with a `proposal_id`.
 2. The REPL intercepts the tool call and asks the user whether to promote the
-   snippet to `script/`. The user's choice is enacted via `save_proposed_script`.
+   snippet to `code/<language>/`. The user's choice is enacted via `save_proposed_script`.
 3. `revise_script` rewrites an existing script, backing up the previous version
    into `res/_proposals/`.
 4. `run_saved_script` invokes a previously saved script by name.
@@ -26,6 +26,7 @@ from research_manager.tools.registry import tool
 _PROPOSALS_SUBDIR = "res/_proposals"
 _LANG_EXT = {"python": ".py", "py": ".py", "r": ".R", "R": ".R", "shell": ".sh", "sh": ".sh"}
 _LANG_NORMALIZE = {"py": "python", "python": "python", "r": "r", "R": "r", "sh": "shell", "shell": "shell"}
+_LANG_CODE_DIR = {"python": "code/python", "r": "code/r", "shell": "code/bash"}
 
 
 def _runner() -> ScriptRunner:
@@ -54,6 +55,42 @@ def _safe_under(workspace: Path, target: Path) -> bool:
         return False
 
 
+def _script_search_dirs(language: str | None = None) -> list[Path]:
+    ws = get_workspace()
+    dirs: list[Path] = []
+    if language:
+        code_dir = _LANG_CODE_DIR.get(language)
+        if code_dir:
+            dirs.append(ws / code_dir)
+    else:
+        dirs.extend(ws / d for d in _LANG_CODE_DIR.values())
+    dirs.append(ws / "script")
+    return dirs
+
+
+def _target_dir_for_language(language: str) -> Path:
+    return get_workspace() / _LANG_CODE_DIR[language]
+
+
+def _resolve_saved_script(name: str, language: str | None = None) -> Path | None:
+    ws = get_workspace()
+    p = Path(name)
+    candidates: list[Path] = []
+    if p.is_absolute():
+        candidates.append(p)
+    else:
+        candidates.append(ws / p)
+        for base in _script_search_dirs(language):
+            candidates.append(base / p)
+            if not p.suffix:
+                for ext in (".py", ".R", ".r", ".sh"):
+                    candidates.append(base / f"{name}{ext}")
+    for cand in candidates:
+        if cand.exists() and _safe_under(ws, cand):
+            return cand
+    return None
+
+
 def _execute_proposal(path: Path, language: str, conda_env: str, timeout: int) -> dict:
     r = _runner()
     if language == "python":
@@ -78,7 +115,7 @@ def propose_script_tool(
     """Propose a project-specific script. Writes to res/_proposals/ and (optionally) executes it.
 
     The user will be prompted in the REPL to decide whether to save this proposal
-    into `script/<name>.<ext>`. Do not save anywhere else; let the REPL handle promotion.
+    into `code/python`, `code/r`, or `code/bash` based on language. Do not save anywhere else; let the REPL handle promotion.
 
     Args:
         name: Logical name without extension (e.g. "normalize_qc"). Used for the final filename.
@@ -110,6 +147,7 @@ def propose_script_tool(
         "created_at": time.time(),
         "proposal_path": str(proposal_path.relative_to(get_workspace())),
         "target_filename": f"{name}{ext}",
+        "target_dir": _LANG_CODE_DIR[lang],
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -117,9 +155,10 @@ def propose_script_tool(
         "proposal_id": proposal_id,
         "proposal_path": meta["proposal_path"],
         "target_filename": meta["target_filename"],
+        "target_dir": meta["target_dir"],
         "language": lang,
         "needs_user_confirmation": True,
-        "hint": "Ask the user (via the REPL prompt) whether to save this proposal to script/.",
+        "hint": "Ask the user (via the REPL prompt) whether to save this proposal to code/<language>/.",
     }
     if run:
         response["execution"] = _execute_proposal(
@@ -134,12 +173,12 @@ def save_proposed_script_tool(
     target_name: str,
     overwrite: bool,
 ) -> str:
-    """Promote a previously proposed script from res/_proposals/ to script/.
+    """Promote a previously proposed script from res/_proposals/ to code/<language>/.
 
     Args:
         proposal_id: The id returned by propose_script.
         target_name: Final filename (with or without extension). Pass empty string to use the proposed name.
-        overwrite: If true, overwrite an existing script/<target_name> instead of refusing.
+        overwrite: If true, overwrite an existing code/<language>/<target_name> instead of refusing.
     """
     ws = get_workspace()
     proposals = _proposals_dir()
@@ -157,14 +196,19 @@ def save_proposed_script_tool(
     if not Path(final_name).suffix:
         final_name = final_name + src.suffix
 
-    dest = ws / "script" / final_name
-    if not _safe_under(ws, dest):
-        return json.dumps({"error": "target path escapes workspace"}, ensure_ascii=False)
+    lang = meta.get("language", "")
+    if lang not in _LANG_CODE_DIR:
+        return json.dumps({"error": f"unknown proposal language: {lang!r}"}, ensure_ascii=False)
+
+    target_root = _target_dir_for_language(lang)
+    dest = target_root / final_name
+    if not _safe_under(target_root, dest):
+        return json.dumps({"error": "target path escapes language code directory"}, ensure_ascii=False)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     if dest.exists() and not overwrite:
         return json.dumps(
-            {"error": f"script/{final_name} already exists; pass overwrite=true to replace"},
+            {"error": f"{dest.relative_to(ws)} already exists; pass overwrite=true to replace"},
             ensure_ascii=False,
         )
 
@@ -195,7 +239,7 @@ def revise_script_tool(
     conda_env: str,
     timeout: int,
 ) -> str:
-    """Rewrite an existing script under script/. The previous version is backed up to res/_proposals/.
+    """Rewrite an existing script under code/ or legacy script/. The previous version is backed up to res/_proposals/.
 
     Args:
         name: Filename of the existing script (with or without extension), e.g. "normalize_qc.py".
@@ -206,15 +250,9 @@ def revise_script_tool(
         timeout: Wall-clock execution timeout in seconds.
     """
     ws = get_workspace()
-    target = ws / "script" / name
-    if not target.exists() and not Path(name).suffix:
-        for ext in (".py", ".R", ".r", ".sh"):
-            cand = ws / "script" / f"{name}{ext}"
-            if cand.exists():
-                target = cand
-                break
-    if not target.exists():
-        return json.dumps({"error": f"script/{name} does not exist"}, ensure_ascii=False)
+    target = _resolve_saved_script(name)
+    if target is None:
+        return json.dumps({"error": f"saved script {name!r} does not exist"}, ensure_ascii=False)
     if not _safe_under(ws, target):
         return json.dumps({"error": "target path escapes workspace"}, ensure_ascii=False)
 
@@ -246,23 +284,17 @@ def run_saved_script_tool(
     conda_env: str,
     timeout: int,
 ) -> str:
-    """Run a previously saved script under script/ by filename.
+    """Run a previously saved script under code/ or legacy script/ by filename.
 
     Args:
-        name: Filename under script/ (with or without extension).
+        name: Filename under code/<language>/ or legacy script/ (with or without extension).
         conda_env: Conda environment name. Pass empty string to use the default environment.
         timeout: Wall-clock execution timeout in seconds.
     """
     ws = get_workspace()
-    target = ws / "script" / name
-    if not target.exists() and not Path(name).suffix:
-        for ext in (".py", ".R", ".r", ".sh"):
-            cand = ws / "script" / f"{name}{ext}"
-            if cand.exists():
-                target = cand
-                break
-    if not target.exists():
-        return json.dumps({"error": f"script/{name} does not exist"}, ensure_ascii=False)
+    target = _resolve_saved_script(name)
+    if target is None:
+        return json.dumps({"error": f"saved script {name!r} does not exist"}, ensure_ascii=False)
 
     ext = target.suffix.lower()
     lang = {".py": "python", ".r": "r", ".sh": "shell"}.get(ext)
@@ -289,5 +321,6 @@ def list_proposals_tool() -> str:
             "language": meta.get("language"),
             "description": meta.get("description"),
             "target_filename": meta.get("target_filename"),
+            "target_dir": meta.get("target_dir"),
         })
     return json.dumps({"proposals": items}, ensure_ascii=False)

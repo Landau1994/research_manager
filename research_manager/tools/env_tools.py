@@ -1,7 +1,7 @@
 """LLM-callable tools for setting up conda environments from workspace scripts.
 
 Flow:
-1. `scan_dependencies` — walk script/ (and optionally packages/) to detect
+1. `scan_dependencies` — walk code/ and legacy script/ (and optionally packages/) to detect
    Python imports (AST) and R library/require calls (regex).
 2. `plan_environment` — generate three install plans (conda-only, mixed
    conda+pip, environment.yml) for user comparison.
@@ -94,15 +94,16 @@ def scan_dependencies_tool(include_packages: bool) -> str:
         include_packages: If true, also scan packages/<name>/src/ trees.
     """
     ws = get_workspace()
-    script_dir = ws / "script"
 
     py_imports: set[str] = set()
     r_libs: set[str] = set()
     per_file: list[dict] = []
 
     targets: list[Path] = []
-    if script_dir.exists():
-        targets.extend(p for p in script_dir.rglob("*") if p.is_file())
+    for subdir in ("code/python", "code/r", "script"):
+        root = ws / subdir
+        if root.exists():
+            targets.extend(p for p in root.rglob("*") if p.is_file())
     if include_packages:
         pkg_root = ws / "packages"
         if pkg_root.exists():

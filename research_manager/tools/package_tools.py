@@ -72,6 +72,20 @@ def _safe_under(workspace: Path, target: Path) -> bool:
         return False
 
 
+def _python_script_path(workspace: Path, script_name: str) -> Path | None:
+    p = Path(script_name)
+    candidates = [workspace / p] if not p.is_absolute() else [p]
+    if not p.is_absolute():
+        candidates.extend([
+            workspace / "code" / "python" / p,
+            workspace / "script" / p,
+        ])
+    for candidate in candidates:
+        if candidate.exists() and candidate.suffix == ".py" and _safe_under(workspace, candidate):
+            return candidate
+    return None
+
+
 def _validate_name(name: str) -> str | None:
     if not _VALID_PKG_NAME.match(name):
         return (
@@ -115,7 +129,7 @@ def build_package_tool(
     Args:
         package_name: Python package name (lowercase, underscores ok, e.g. "my_analysis").
         description: One-line description for pyproject.toml.
-        scripts: List of filenames from script/ to include (e.g. ["clean.py", "utils.py"]).
+        scripts: List of Python script filenames from code/python/ or legacy script/ to include (e.g. ["clean.py", "utils.py"]).
         version: Package version string (e.g. "0.1.0").
         dependencies: Python package dependencies (e.g. ["numpy>=1.24", "pandas"]).
     """
@@ -131,10 +145,10 @@ def build_package_tool(
             ensure_ascii=False,
         )
 
-    missing = [s for s in scripts if not (ws / "script" / s).exists()]
+    missing = [s for s in scripts if _python_script_path(ws, s) is None]
     if missing:
         return json.dumps(
-            {"error": f"scripts not found in script/: {missing}"},
+            {"error": f"Python scripts not found in code/python/ or script/: {missing}"},
             ensure_ascii=False,
         )
 
@@ -191,7 +205,7 @@ def confirm_package_build_tool(
 
     Args:
         package_name: Python package name.
-        scripts: List of filenames from script/ to copy into the package.
+        scripts: List of Python script filenames from code/python/ or legacy script/ to copy into the package.
         description: One-line description.
         version: Package version string.
         dependencies: Python package dependencies.
@@ -226,14 +240,12 @@ def confirm_package_build_tool(
 
     copied: list[str] = []
     for script_name in scripts:
-        src_file = ws / "script" / script_name
-        if not src_file.exists():
+        src_file = _python_script_path(ws, script_name)
+        if src_file is None:
             continue
-        if not _safe_under(ws, src_file):
-            continue
-        dest = src_dir / script_name
+        dest = src_dir / src_file.name
         shutil.copy2(src_file, dest)
-        copied.append(script_name)
+        copied.append(src_file.name)
 
     init_content = _render_init(package_name, copied)
     (src_dir / "__init__.py").write_text(init_content, encoding="utf-8")

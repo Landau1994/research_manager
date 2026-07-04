@@ -15,6 +15,7 @@ from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -33,6 +34,17 @@ from research_manager.memory import (
 )
 from research_manager.recording import TrajectoryRecorder
 from research_manager.sessions import auto_save, list_sessions, load_session, manual_save, pick_auto_slot
+from research_manager.setup_r import (
+    DEFAULT_R_PACKAGE,
+    DEFAULT_R_VERSION,
+    build_r_setup_commands,
+    configure_r_repositories,
+    current_conda_env,
+    execute_commands,
+    find_conda,
+    format_command,
+    inspect_r_setup,
+)
 from research_manager.tools import ToolRegistry  # noqa: F401  (triggers tool registration)
 from research_manager.tools import external_access
 from research_manager.workspace.manager import init_workspace, validate_workspace
@@ -40,6 +52,7 @@ from research_manager.workspace.manager import init_workspace, validate_workspac
 console = Console()
 
 _AUTO_APPROVE_PROPOSALS = False
+_PYTHON_REQUIREMENTS_PLACEHOLDER = "# Add project-specific Python packages here"
 
 
 def _print_banner() -> None:
@@ -65,6 +78,58 @@ def _print_tools() -> None:
     for t in sorted(tools, key=lambda x: (x["category"], x["name"])):
         table.add_row(t["name"], t["category"], t["description"])
     console.print(table)
+
+
+def _requirements_is_auto_placeholder(text: str) -> bool:
+    stripped = text.strip()
+    return not stripped or stripped.startswith(_PYTHON_REQUIREMENTS_PLACEHOLDER)
+
+
+def _maybe_generate_python_requirements(ws: Path) -> None:
+    """Create code/python/requirements.txt from the active Python environment.
+
+    Existing user-maintained requirements are left untouched. The init scaffold's
+    placeholder file is treated as empty so first launch can populate it.
+    """
+    python_dir = ws / "code" / "python"
+    if not python_dir.exists():
+        return
+
+    req = python_dir / "requirements.txt"
+    try:
+        existing = req.read_text(encoding="utf-8") if req.exists() else ""
+    except OSError:
+        return
+    if not _requirements_is_auto_placeholder(existing):
+        return
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "freeze", "--local"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        console.print(f"[dim yellow]could not generate code/python/requirements.txt: {e}[/dim yellow]")
+        return
+    if result.returncode != 0:
+        msg = (result.stderr or result.stdout).strip()
+        console.print(f"[dim yellow]could not generate code/python/requirements.txt: {msg[-300:]}[/dim yellow]")
+        return
+
+    content = result.stdout.strip()
+    if content:
+        content += "\n"
+    else:
+        content = "# No local pip packages detected in the active Python environment.\n"
+    try:
+        req.write_text(content, encoding="utf-8")
+    except OSError as e:
+        console.print(f"[dim yellow]could not write code/python/requirements.txt: {e}[/dim yellow]")
+        return
+    console.print(f"[dim]updated code/python/requirements.txt from active Python environment[/dim]")
 
 
 def _print_help() -> None:
@@ -116,6 +181,7 @@ def _on_tool_call(name: str, args: dict, result: str) -> None:
 def _print_proposal_preview(args: dict, parsed: dict) -> None:
     lang = parsed.get("language", "text")
     syntax_lang = {"python": "python", "r": "r", "shell": "bash"}.get(lang, "text")
+    target_dir = parsed.get("target_dir") or "code"
     code = args.get("code", "")
     if not code:
         ws = get_workspace()
@@ -129,7 +195,7 @@ def _print_proposal_preview(args: dict, parsed: dict) -> None:
         console.print(
             Panel(
                 Syntax(code, syntax_lang, line_numbers=True, theme="ansi_dark"),
-                title=f"proposal {parsed.get('proposal_id', '')} → script/{parsed.get('target_filename', '')}",
+                title=f"proposal {parsed.get('proposal_id', '')} → {target_dir}/{parsed.get('target_filename', '')}",
                 border_style="yellow",
             )
         )
@@ -145,6 +211,7 @@ def _handle_proposal(args: dict, result: str) -> None:
 
     proposal_id = parsed.get("proposal_id")
     target = parsed.get("target_filename", "")
+    target_dir = parsed.get("target_dir") or "code"
     if not proposal_id:
         return
 
@@ -163,7 +230,7 @@ def _handle_proposal(args: dict, result: str) -> None:
 
     try:
         choice = console.input(
-            f"[bold yellow]save proposal {proposal_id} → script/{target}? "
+            f"[bold yellow]save proposal {proposal_id} → {target_dir}/{target}? "
             "(y/N/edit/rename): [/bold yellow]"
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -236,7 +303,7 @@ def _save_proposal(
     if "already exists" in err and prompt_on_conflict and sys.stdin.isatty():
         try:
             choice = console.input(
-                f"[yellow]script/{target_name} already exists — (o)verwrite / (r)ename / (c)ancel? [/yellow]"
+                f"[yellow]{target_name} already exists — (o)verwrite / (r)ename / (c)ancel? [/yellow]"
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]cancelled[/dim]")
@@ -334,17 +401,19 @@ def _run_package_command(name: str, ws: Path) -> None:
         console.print("[yellow]usage: /package <name>[/yellow]")
         return
 
-    script_dir = ws / "script"
-    if not script_dir.exists():
-        console.print("[red]no script/ directory in workspace[/red]")
-        return
-
-    py_scripts = sorted(f.name for f in script_dir.iterdir() if f.is_file() and f.suffix == ".py")
+    py_scripts: list[str] = []
+    for base in (ws / "code" / "python", ws / "script"):
+        if base.exists():
+            for f in sorted(base.iterdir()):
+                if f.is_file() and f.suffix == ".py":
+                    label = str(f.relative_to(ws))
+                    if label not in py_scripts:
+                        py_scripts.append(label)
     if not py_scripts:
-        console.print("[yellow]no .py scripts found in script/[/yellow]")
+        console.print("[yellow]no .py scripts found in code/python/ or script/[/yellow]")
         return
 
-    console.print("[dim]scripts in workspace:[/dim]")
+    console.print("[dim]Python scripts in workspace:[/dim]")
     for i, s in enumerate(py_scripts, 1):
         console.print(f"  [green]{i}.[/green] {s}")
 
@@ -570,7 +639,7 @@ def _run_env_command(arg: str, ws: Path) -> None:
 
     console.print(
         "[dim]usage:\n"
-        "  /env scan [--all]   - scan script/ (and optionally packages/) for deps\n"
+        "  /env scan [--all]   - scan code/ and legacy script/ for deps\n"
         "  /env plan           - interactively plan a conda env from scanned deps[/dim]"
     )
 
@@ -580,7 +649,7 @@ def _interactive_env_plan(ws: Path) -> None:
     py = scan.get("python_imports", [])
     r_pkgs = scan.get("r_packages", [])
     if not py and not r_pkgs:
-        console.print("[yellow]nothing to plan — no imports found in script/[/yellow]")
+        console.print("[yellow]nothing to plan — no imports found in code/ or script/[/yellow]")
         return
 
     console.print(f"[bold]python deps:[/bold] {', '.join(py) if py else '(none)'}")
@@ -783,6 +852,7 @@ def _maybe_offer_resume(client: ResearchLLMClient, ws: Path, mode: str) -> tuple
 def _run_interactive(mode: str, record: bool = False) -> None:
     _print_banner()
     ws = set_workspace(Path.cwd())
+    _maybe_generate_python_requirements(ws)
     client = _make_client(mode=mode, workspace=ws)
 
     auto_slot = pick_auto_slot(ws)
@@ -1028,6 +1098,7 @@ def _run_interactive(mode: str, record: bool = False) -> None:
 
 def _run_oneshot(question: str, mode: str, output: str = "", record: bool = False) -> None:
     ws = set_workspace(Path.cwd())
+    _maybe_generate_python_requirements(ws)
     client = _make_client(mode=mode, workspace=ws)
     recorder = _maybe_make_recorder(record, ws, client.model, mode)
     if recorder is not None:
@@ -1166,6 +1237,8 @@ def _run_init(path: str, force: bool) -> None:
             "\n[yellow]hint:[/yellow] copy .env.example to .env and set your OPENAI_API_KEY "
             "before running the agent."
         )
+    if result["created"]:
+        _maybe_offer_r_setup_after_init()
 
 
 def _run_validate(path: str) -> None:
@@ -1175,6 +1248,185 @@ def _run_validate(path: str) -> None:
         console.print(f"[green]✓ workspace OK[/green]: {result['workspace']}")
     else:
         console.print(f"[red]✗ workspace incomplete[/red]: missing {result['missing']}")
+
+
+def _maybe_offer_r_setup_after_init() -> None:
+    if not sys.stdin.isatty():
+        return
+    try:
+        choice = console.input(
+            "[bold yellow]configure R in a conda environment now? (y/N): [/bold yellow]"
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[dim]skipped R setup[/dim]")
+        return
+    if choice not in ("y", "yes"):
+        console.print("[dim]skipped R setup; run `easy-research setup-r` later if needed[/dim]")
+        return
+
+    args = argparse.Namespace(
+        env="",
+        r_version=DEFAULT_R_VERSION,
+        r_package=DEFAULT_R_PACKAGE,
+        dry_run=False,
+        yes=False,
+        timeout=1800,
+    )
+    _run_setup_r(args)
+
+
+def _run_setup_r(args) -> None:
+    conda = find_conda()
+    default_env = current_conda_env(conda)
+    env_name = (args.env or default_env).strip()
+    if not env_name:
+        console.print("[red]empty conda environment name[/red]")
+        return
+
+    if not args.env and sys.stdin.isatty() and not args.yes:
+        try:
+            chosen = console.input(f"[yellow]conda env [{default_env}]: [/yellow]").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]cancelled[/dim]")
+            return
+        if chosen:
+            env_name = chosen
+
+    r_version = (args.r_version or DEFAULT_R_VERSION).strip()
+    r_package = (args.r_package or DEFAULT_R_PACKAGE).strip()
+
+    status = inspect_r_setup(env_name, conda, r_package)
+    if status.conda_exe is None:
+        console.print("[red]conda not found on PATH. Install conda first or set CONDA_EXE.[/red]")
+        return
+
+    console.print(f"[dim]conda: {status.conda_exe}[/dim]")
+    console.print(f"[dim]env: {env_name}[/dim]")
+    if status.r_installed:
+        console.print(f"[green]R detected[/green] [dim]version {status.r_version or 'unknown'}[/dim]")
+    else:
+        console.print("[yellow]R not detected in this env[/yellow]")
+        if status.r_error:
+            console.print(f"[dim]{status.r_error[-300:]}[/dim]")
+    if status.tidyverse_installed:
+        console.print(f"[green]{r_package} detected[/green]")
+    else:
+        console.print(f"[yellow]{r_package} not detected in this env[/yellow]")
+    if status.repos_configured:
+        console.print("[green]R package repositories configured[/green]")
+    else:
+        console.print("[yellow]R package repositories not configured in this env[/yellow]")
+
+    use_active_rscript = env_name == os.environ.get("CONDA_DEFAULT_ENV", "").strip()
+    commands = build_r_setup_commands(
+        env_name,
+        r_version=r_version,
+        r_package=r_package,
+        system_deps=status.missing_system_deps,
+        install_r=not status.r_installed,
+        configure_repos=not status.repos_configured,
+        install_package=not status.tidyverse_installed,
+        use_active_rscript=use_active_rscript,
+    )
+    if not commands:
+        console.print("[green]R environment is already ready.[/green]")
+        return
+
+    console.print("\n[bold]planned commands:[/bold]")
+    for command in commands:
+        console.print(f"  {format_command(command, status.conda_exe)}")
+
+    if args.dry_run:
+        return
+
+    execute = bool(args.yes)
+    if not execute:
+        if not sys.stdin.isatty():
+            console.print("[dim]non-interactive session; rerun with --yes to execute or --dry-run to print only[/dim]")
+            return
+        try:
+            choice = console.input("[bold yellow]execute these commands? (y/N): [/bold yellow]").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]cancelled[/dim]")
+            return
+        execute = choice in ("y", "yes")
+    if not execute:
+        console.print("[dim]cancelled[/dim]")
+        return
+
+    ok = True
+    current_task = None
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    )
+
+    def on_step_start(idx: int, command: list[str]) -> None:
+        nonlocal current_task
+        rendered = format_command(command, status.conda_exe)
+        current_task = progress.add_task(f"step {idx + 1}/{len(commands)}", total=1)
+        progress.console.print(f"[bold]running step {idx + 1}/{len(commands)}:[/bold] {rendered}")
+
+    def on_output(idx: int, line: str) -> None:
+        if line.strip():
+            progress.console.print(f"[dim]{line}[/dim]")
+
+    def on_step_finish(idx: int, step: dict[str, str | int | bool]) -> None:
+        if current_task is not None:
+            progress.update(current_task, completed=1)
+        marker = "[green]✓[/green]" if step["ok"] else "[red]✗[/red]"
+        progress.console.print(f"{marker} {step['command']}")
+
+    with progress:
+        results = execute_commands(
+            commands,
+            conda_exe=status.conda_exe,
+            timeout=args.timeout,
+            on_step_start=on_step_start,
+            on_output=on_output,
+            on_step_finish=on_step_finish,
+        )
+
+    for step in results:
+        if not step["ok"]:
+            ok = False
+            stderr = str(step.get("stderr_tail") or "")
+            stdout = str(step.get("stdout_tail") or "")
+            if stderr:
+                console.print(f"[dim red]{stderr}[/dim red]")
+            elif stdout:
+                console.print(f"[dim red]{stdout}[/dim red]")
+            break
+    if ok:
+        final = inspect_r_setup(env_name, status.conda_exe, r_package)
+        if final.r_installed and final.tidyverse_installed:
+            console.print(f"[green]R setup complete[/green] [dim]env={env_name}[/dim]")
+        else:
+            console.print("[yellow]commands finished, but final verification did not pass[/yellow]")
+
+
+def _run_configure_r_repos(args) -> None:
+    conda = find_conda()
+    if not conda:
+        console.print("[red]conda not found on PATH. Install conda first or set CONDA_EXE.[/red]")
+        return
+    env_name = (args.env or current_conda_env(conda)).strip()
+    if not env_name:
+        console.print("[red]empty conda environment name[/red]")
+        return
+    try:
+        use_active_rscript = env_name == os.environ.get("CONDA_DEFAULT_ENV", "").strip()
+        profile = configure_r_repositories(conda, env_name, use_active_rscript=use_active_rscript)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        console.print(f"[red]failed to configure R package repositories:[/red] {e}")
+        return
+    console.print(f"[green]R package repositories configured[/green] [dim]{profile}[/dim]")
 
 
 def _resolve_trajectory_id(ws: Path, session_id: str) -> Path | None:
@@ -1338,6 +1590,19 @@ def main() -> None:
     p_clean = sub.add_parser("clean", help="Remove all files and directories in the workspace")
     p_clean.add_argument("path", nargs="?", default=".", help="Workspace path (default: current dir)")
 
+    # setup-r
+    p_setup_r = sub.add_parser("setup-r", help="Configure R and tidyverse in a conda environment")
+    p_setup_r.add_argument("--env", default="", help="Conda environment name (default: current env)")
+    p_setup_r.add_argument("--r-version", default=DEFAULT_R_VERSION, help=f"R version for conda install (default: {DEFAULT_R_VERSION})")
+    p_setup_r.add_argument("--r-package", default=DEFAULT_R_PACKAGE, help=f"R package to install with install.packages (default: {DEFAULT_R_PACKAGE})")
+    p_setup_r.add_argument("--dry-run", action="store_true", help="Print planned commands without executing")
+    p_setup_r.add_argument("--yes", action="store_true", help="Execute without interactive confirmation")
+    p_setup_r.add_argument("--timeout", type=int, default=1800, help="Timeout per install command in seconds")
+
+    # Internal maintenance command used by setup-r planned commands.
+    p_config_repos = sub.add_parser("configure-r-repos", help=argparse.SUPPRESS)
+    p_config_repos.add_argument("-n", "--env", default="", help=argparse.SUPPRESS)
+
     # batch
     p_batch = sub.add_parser("batch", help="Run a batch of questions from a file")
     p_batch.add_argument("file", help="File with questions separated by lines containing only ---")
@@ -1387,6 +1652,12 @@ def main() -> None:
         return
     if args.command == "clean":
         _run_clean(args.path)
+        return
+    if args.command == "setup-r":
+        _run_setup_r(args)
+        return
+    if args.command == "configure-r-repos":
+        _run_configure_r_repos(args)
         return
     if args.command == "batch":
         _run_batch(args.file, output_dir=args.output, workers=args.workers, mode=args.mode)

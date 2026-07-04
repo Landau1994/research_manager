@@ -20,7 +20,10 @@ This creates:
 ```
 my_project/
 ├── data/
-├── script/
+├── code/
+│   ├── python/
+│   ├── r/
+│   └── bash/
 ├── res/{fig,h5ad,python_obj,r_obj,txt}/
 ├── report/{article,blog,book}/
 └── .research_manager_state.json
@@ -28,7 +31,7 @@ my_project/
 
 ## 3. Add data and a script
 
-Drop a CSV in `data/`, then write `script/analyze.py`:
+Drop a CSV in `data/`, then write `code/python/analyze.py`:
 ```python
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -49,7 +52,7 @@ easy-research
 
 In the REPL:
 ```
-you > run script/analyze.py in conda env "data-sci" and tell me what it produced
+you > run code/python/analyze.py in conda env "data-sci" and tell me what it produced
 you > /mode article
 you > draft an introduction for an article based on the summary in res/txt/summary.csv
 you > /quit

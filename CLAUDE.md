@@ -8,7 +8,7 @@ Project-level instructions for Claude Code sessions working on this repository.
 
 ## Key References
 
-- `demo_work_dir/` — canonical workspace template (data/script/res/report/packages structure)
+- `demo_work_dir/` — canonical workspace template (data/code/res/report/packages structure; legacy script/ still supported)
 - `/home/wlt2025/project/ai4math` — reference implementation for LLM client, tool registry, subprocess isolation, and CLI patterns. Mirror these architectural patterns.
 
 ## Architecture Decisions
