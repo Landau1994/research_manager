@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- R setup workflow and workspace code layout updates (2026-07-05):
+  - `easy-research setup-r` configures conda-only R support, detects installed
+    R/tidyverse/system dependencies before planning commands, and skips already
+    installed conda packages.
+  - R package repositories are written to the target env's `Rprofile.site`:
+    USTC CRAN plus Westlake Bioconductor software and annotation mirrors.
+  - Active conda env setup uses direct `Rscript -e "install.packages(...)"`;
+    `conda run -n <env>` is reserved for non-active target envs.
+  - Workspace initialization now creates `code/python`, `code/r`, and
+    `code/bash` scaffolds while keeping legacy `script/` support.
+
 - Project memory + auto-resume + persistent REPL history (2026-05-30):
   - `research_manager/memory.py` — new module. `load_memory(workspace)` reads `MEMORY.md` from the workspace root; `inject_into_system_prompt(base, mem)` appends it under a stable `## Project Memory (from MEMORY.md)` header (idempotent — re-injecting replaces the previous block, never stacks). `append_memory(ws, fact, title=None, category=...)` writes to `MEMORY.md` with `## <title> <!-- id · category · added -->` headers; same-title sections deduplicate (subsequent facts append as dated bullets under the existing header rather than spawning a duplicate). `freshest_resumable_slot(ws)` scans the auto-save slots and returns metadata for the most recent slot worth resuming (must have user turns; ≤ 7 days old).
   - `research_manager/cli.py` — REPL startup now: (1) injects `MEMORY.md` into the system prompt via `_build_system_prompt(mode, workspace)`, (2) prints `memory: MEMORY.md loaded into system prompt` when a file is present, (3) calls `_maybe_offer_resume()` which prompts `resume? (y/N)` for the freshest recent slot (skipped silently when stdin isn't a TTY or `RM_NO_RESUME=1`). The same `_build_system_prompt` is reused on `/mode` and `/load` switches so memory survives mode/session changes. `_batch_worker` also injects memory.
