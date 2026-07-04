@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- Repository-level Codex/agent instructions in `AGENTS.md`, including the
+  workflow to check git status around substantial changes, update docs, commit,
+  and push completed work.
+
 - R setup workflow and workspace code layout updates (2026-07-05):
   - `easy-research setup-r` configures conda-only R support, detects installed
     R/tidyverse/system dependencies before planning commands, and skips already

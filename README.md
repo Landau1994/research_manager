@@ -50,22 +50,6 @@ easy-research batch questions.md -w 4               # parallel batch
 
 See [examples/quickstart.md](examples/quickstart.md) for a fuller walkthrough.
 
-## Recent Updates
-
-### 2026-07-05
-
-- Added `easy-research setup-r` for conda-only R setup. It detects R,
-  `tidyverse`, and build/system dependencies before planning installs, so
-  already-installed conda packages are not reinstalled.
-- R package repositories are configured in the target conda env's
-  `Rprofile.site`: USTC CRAN plus Westlake Bioconductor software and annotation
-  mirrors.
-- When setup targets the currently active conda env, R package installation uses
-  direct `Rscript -e "install.packages(...)"`; `conda run -n <env>` is only used
-  for non-active envs.
-- Workspace initialization now creates `code/python`, `code/r`, and `code/bash`
-  scaffold directories while continuing to support legacy `script/`.
-
 ## Motivation
 
 Research workflows involve repetitive cycles of data processing, result interpretation, and writing. This agent automates the glue between these stages — running scripts, collecting results, and drafting structured documents — while keeping the researcher in control of decisions.
@@ -354,3 +338,19 @@ is tuned for Nature/Nature Communications-style scientific writing.
 ## License
 
 TBD
+
+## Recent Updates
+
+### 2026-07-05
+
+- Added `easy-research setup-r` for conda-only R setup. It detects R,
+  `tidyverse`, and build/system dependencies before planning installs, so
+  already-installed conda packages are not reinstalled.
+- R package repositories are configured in the target conda env's
+  `Rprofile.site`: USTC CRAN plus Westlake Bioconductor software and annotation
+  mirrors.
+- When setup targets the currently active conda env, R package installation uses
+  direct `Rscript -e "install.packages(...)"`; `conda run -n <env>` is only used
+  for non-active envs.
+- Workspace initialization now creates `code/python`, `code/r`, and `code/bash`
+  scaffold directories while continuing to support legacy `script/`.
